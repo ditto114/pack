@@ -28,6 +28,7 @@ class PacketDisplay:
     summary: str
     payload: Optional[bytes]
     note: Optional[str] = None
+    utf8_text: Optional[str] = None
 
 
 NetworkType = Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
@@ -51,6 +52,7 @@ class PacketCaptureApp:
         self.master.title("패킷 캡쳐 도구")
         self.packet_queue: "queue.Queue[PacketDisplay]" = queue.Queue()
         self.packet_list_data: list[PacketDisplay] = []
+        self.display_indices: list[int] = []
         self.stop_event = threading.Event()
         self.sniffer: Optional[AsyncSniffer] = None
 
@@ -86,6 +88,20 @@ class PacketCaptureApp:
         self.port_entry = ttk.Entry(filter_frame)
         self.port_entry.grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(0, 8))
         ttk.Label(filter_frame, text="(비우면 모든 포트)").grid(row=1, column=2, padx=(0, 8), pady=(0, 8))
+
+        ttk.Label(filter_frame, text="텍스트 포함").grid(row=2, column=0, padx=(8, 4), pady=(0, 8))
+        self.text_filter_var = tk.StringVar()
+        self.text_filter_entry = ttk.Entry(filter_frame, textvariable=self.text_filter_var)
+        self.text_filter_entry.grid(row=2, column=1, sticky="ew", padx=(0, 8), pady=(0, 8))
+        ttk.Label(filter_frame, text="(UTF-8 텍스트 기준 검색)").grid(
+            row=2,
+            column=2,
+            columnspan=2,
+            padx=(0, 8),
+            pady=(0, 8),
+            sticky="w",
+        )
+        self.text_filter_var.trace_add("write", self._on_text_filter_change)
 
         # 제어 버튼
         button_frame = ttk.Frame(main_frame)
@@ -163,7 +179,15 @@ class PacketCaptureApp:
 
             payload = self._extract_payload_bytes(packet)
             summary = packet.summary()
-            self.packet_queue.put(PacketDisplay(summary=summary, payload=payload))
+            utf8_text = None
+            if payload:
+                try:
+                    utf8_text = payload.decode("utf-8")
+                except UnicodeDecodeError:
+                    utf8_text = payload.decode("utf-8", errors="replace")
+            self.packet_queue.put(
+                PacketDisplay(summary=summary, payload=payload, utf8_text=utf8_text)
+            )
 
         self.sniffer = AsyncSniffer(
             store=False,
@@ -294,6 +318,7 @@ class PacketCaptureApp:
     # ------------------------------------------------------------------
     # UI 보조 메서드
     def _poll_queue(self) -> None:
+        updated = False
         while True:
             try:
                 item = self.packet_queue.get_nowait()
@@ -301,7 +326,10 @@ class PacketCaptureApp:
                 break
             else:
                 self.packet_list_data.append(item)
-                self.packet_list.insert(tk.END, item.summary)
+                updated = True
+
+        if updated:
+            self._refresh_packet_list()
 
         self.master.after(200, self._poll_queue)
 
@@ -319,7 +347,8 @@ class PacketCaptureApp:
 
         index = selection[0]
         try:
-            item = self.packet_list_data[index]
+            actual_index = self.display_indices[index]
+            item = self.packet_list_data[actual_index]
         except IndexError:  # pragma: no cover - 리스트 동기화 문제 방지용
             return
 
@@ -381,9 +410,49 @@ class PacketCaptureApp:
     def _on_change_encoding(self, _: tk.Event | None = None) -> None:
         self._refresh_detail_view()
 
+    def _on_text_filter_change(self, *_: object) -> None:
+        self._refresh_packet_list()
+        self._refresh_detail_view()
+
+    def _refresh_packet_list(self) -> None:
+        selection = self.packet_list.curselection()
+        selected_actual_index = None
+        if selection:
+            displayed_index = selection[0]
+            if 0 <= displayed_index < len(self.display_indices):
+                selected_actual_index = self.display_indices[displayed_index]
+
+        filter_text = self.text_filter_var.get().strip().lower()
+
+        self.packet_list.delete(0, tk.END)
+        self.display_indices.clear()
+
+        for idx, item in enumerate(self.packet_list_data):
+            if self._matches_text_filter(item, filter_text):
+                self.packet_list.insert(tk.END, item.summary)
+                self.display_indices.append(idx)
+
+        if selected_actual_index is not None:
+            try:
+                new_index = self.display_indices.index(selected_actual_index)
+            except ValueError:
+                pass
+            else:
+                self.packet_list.selection_set(new_index)
+                self.packet_list.see(new_index)
+
+    @staticmethod
+    def _matches_text_filter(item: PacketDisplay, filter_text: str) -> bool:
+        if not filter_text:
+            return True
+        if not item.utf8_text:
+            return False
+        return filter_text in item.utf8_text.lower()
+
     def _clear_capture_results(self) -> None:
         self.packet_list.delete(0, tk.END)
         self.packet_list_data.clear()
+        self.display_indices.clear()
         self._set_detail_text("캡쳐를 시작하면 패킷이 여기에 표시됩니다.")
 
     def _set_running_state(self, running: bool) -> None:

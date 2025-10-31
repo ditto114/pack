@@ -7,18 +7,36 @@
 
 from __future__ import annotations
 
+import ipaddress
 import queue
 import threading
 import tkinter as tk
+from dataclasses import dataclass
 from tkinter import messagebox, ttk
-from typing import Optional
+from typing import Optional, Union
 
 try:
-    from scapy.all import IP, Raw, sniff  # type: ignore
+    from scapy.all import AsyncSniffer, IP, IPv6, Raw, TCP, UDP  # type: ignore
 except ImportError as exc:  # pragma: no cover - scapy 미설치 환경 대비
     raise SystemExit(
         "Scapy가 설치되어 있지 않습니다. 'pip install scapy' 명령으로 설치 후 다시 실행하세요."
     ) from exc
+
+
+@dataclass
+class PacketDisplay:
+    summary: str
+    payload: Optional[bytes]
+    note: Optional[str] = None
+
+
+NetworkType = Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
+
+
+@dataclass
+class FilterConfig:
+    networks: list[NetworkType]
+    port: Optional[int]
 
 
 class PacketCaptureApp:
@@ -31,12 +49,14 @@ class PacketCaptureApp:
     def __init__(self, master: tk.Tk) -> None:
         self.master = master
         self.master.title("패킷 캡쳐 도구")
-        self.packet_queue: "queue.Queue[tuple[str, str]]" = queue.Queue()
+        self.packet_queue: "queue.Queue[PacketDisplay]" = queue.Queue()
+        self.packet_list_data: list[PacketDisplay] = []
         self.stop_event = threading.Event()
-        self.capture_thread: Optional[threading.Thread] = None
+        self.sniffer: Optional[AsyncSniffer] = None
 
         self._build_widgets()
         self._poll_queue()
+        self.master.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ------------------------------------------------------------------
     # UI 구성
@@ -53,11 +73,19 @@ class PacketCaptureApp:
         filter_frame = ttk.LabelFrame(main_frame, text="필터")
         filter_frame.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 8))
         filter_frame.columnconfigure(1, weight=1)
+        filter_frame.columnconfigure(3, weight=1)
 
-        ttk.Label(filter_frame, text="대상 IP").grid(row=0, column=0, padx=(8, 4), pady=8)
+        ttk.Label(filter_frame, text="대상 IP/네트워크").grid(row=0, column=0, padx=(8, 4), pady=8)
         self.ip_entry = ttk.Entry(filter_frame)
         self.ip_entry.grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=8)
-        ttk.Label(filter_frame, text="(비워두면 모든 패킷 캡쳐)").grid(row=0, column=2, padx=(0, 8))
+        ttk.Label(filter_frame, text="예: 192.168.0.10 또는 2001:db8::/64").grid(
+            row=0, column=2, columnspan=2, padx=(0, 8), sticky="w"
+        )
+
+        ttk.Label(filter_frame, text="포트").grid(row=1, column=0, padx=(8, 4), pady=(0, 8))
+        self.port_entry = ttk.Entry(filter_frame)
+        self.port_entry.grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(0, 8))
+        ttk.Label(filter_frame, text="(비우면 모든 포트)").grid(row=1, column=2, padx=(0, 8), pady=(0, 8))
 
         # 제어 버튼
         button_frame = ttk.Frame(main_frame)
@@ -84,113 +112,196 @@ class PacketCaptureApp:
         self.packet_list.configure(yscrollcommand=scrollbar.set)
 
         # 패킷 상세
-        detail_frame = ttk.LabelFrame(main_frame, text="패킷 상세 및 UTF-8 내용")
+        detail_frame = ttk.LabelFrame(main_frame, text="패킷 상세 및 페이로드")
         detail_frame.grid(row=3, column=0, sticky="nsew", pady=(8, 0))
         detail_frame.columnconfigure(0, weight=1)
-        detail_frame.rowconfigure(0, weight=1)
+        detail_frame.rowconfigure(1, weight=1)
 
-        self.detail_text = tk.Text(detail_frame, height=10, wrap="word")
-        self.detail_text.grid(row=0, column=0, sticky="nsew")
+        encoding_frame = ttk.Frame(detail_frame)
+        encoding_frame.grid(row=0, column=0, columnspan=2, sticky="ew", padx=4, pady=(4, 0))
+        encoding_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(encoding_frame, text="텍스트 인코딩").grid(row=0, column=0, padx=(0, 8))
+        self.encoding_var = tk.StringVar(value="utf-8")
+        self.encoding_combo = ttk.Combobox(
+            encoding_frame,
+            textvariable=self.encoding_var,
+            values=("utf-8", "euc-kr", "cp949", "latin-1", "shift_jis"),
+            state="readonly",
+        )
+        self.encoding_combo.grid(row=0, column=1, sticky="ew")
+        self.encoding_combo.bind("<<ComboboxSelected>>", self._on_change_encoding)
+
+        self.detail_text = tk.Text(detail_frame, height=12, wrap="word")
+        self.detail_text.grid(row=1, column=0, sticky="nsew")
         detail_scroll = ttk.Scrollbar(detail_frame, orient=tk.VERTICAL, command=self.detail_text.yview)
-        detail_scroll.grid(row=0, column=1, sticky="ns")
+        detail_scroll.grid(row=1, column=1, sticky="ns")
         self.detail_text.configure(yscrollcommand=detail_scroll.set, state=tk.DISABLED)
+        self._set_detail_text("캡쳐를 시작하면 패킷이 여기에 표시됩니다.")
 
     # ------------------------------------------------------------------
     # 이벤트 핸들러
     def start_capture(self) -> None:
-        if self.capture_thread and self.capture_thread.is_alive():
+        if self.sniffer and self.sniffer.running:
             messagebox.showinfo("알림", "이미 캡쳐가 진행 중입니다.")
             return
 
-        self.stop_event.clear()
-        ip_filter = self.ip_entry.get().strip()
-        self.capture_thread = threading.Thread(
-            target=self._capture_packets,
-            args=(ip_filter,),
-            daemon=True,
-        )
-        self.capture_thread.start()
-
-        self.start_button.config(state=tk.DISABLED)
-        self.stop_button.config(state=tk.NORMAL)
-
-    def stop_capture(self) -> None:
-        if not self.capture_thread:
-            return
-        self.stop_event.set()
-        self.capture_thread.join(timeout=1.0)
-        self.capture_thread = None
-
-        self.start_button.config(state=tk.NORMAL)
-        self.stop_button.config(state=tk.DISABLED)
-
-    def _on_select_packet(self, _: tk.Event) -> None:
-        selection = self.packet_list.curselection()
-        if not selection:
-            return
-        index = selection[0]
         try:
-            summary, payload = self.packet_list_data[index]
-        except IndexError:  # pragma: no cover - 리스트 동기화 문제 방지용
+            filter_config = self._build_filter_config(
+                self.ip_entry.get().strip(), self.port_entry.get().strip()
+            )
+        except ValueError as exc:
+            messagebox.showerror("입력 오류", str(exc))
             return
 
-        self._set_detail_text(f"요약:\n{summary}\n\nUTF-8 내용:\n{payload}")
-
-    # ------------------------------------------------------------------
-    # 캡쳐 로직
-    def _capture_packets(self, ip_filter: str) -> None:
-        self.packet_list_data: list[tuple[str, str]] = []
+        self._clear_capture_results()
+        self.stop_event.clear()
 
         def packet_handler(packet) -> None:
             if self.stop_event.is_set():
                 return
-            if ip_filter and not self._packet_matches_ip(packet, ip_filter):
-                return
 
+            payload = self._extract_payload_bytes(packet)
             summary = packet.summary()
-            payload = self._extract_payload(packet)
-            self.packet_queue.put((summary, payload))
+            self.packet_queue.put(PacketDisplay(summary=summary, payload=payload))
 
+        self.sniffer = AsyncSniffer(
+            store=False,
+            prn=packet_handler,
+            lfilter=lambda pkt: self._packet_matches_filter(pkt, filter_config),
+        )
+
+        self._set_running_state(True)
         try:
-            sniff(  # type: ignore[call-arg]
-                prn=packet_handler,
-                stop_filter=lambda _: self.stop_event.is_set(),
-                store=False,
-            )
+            self.sniffer.start()
         except PermissionError:
-            self.packet_queue.put(("[오류] 캡쳐 권한이 필요합니다. 관리자 권한으로 실행하세요.", ""))
+            self.sniffer = None
+            self._set_running_state(False)
+            self.packet_queue.put(
+                PacketDisplay(
+                    summary="[오류] 캡쳐 권한이 필요합니다.",
+                    payload=None,
+                    note="관리자 권한 또는 sudo로 다시 실행하세요.",
+                )
+            )
+            return
         except OSError as exc:
-            self.packet_queue.put((f"[오류] 캡쳐 도중 문제가 발생했습니다: {exc}", ""))
+            self.sniffer = None
+            self._set_running_state(False)
+            self.packet_queue.put(
+                PacketDisplay(
+                    summary="[오류] 캡쳐 도중 문제가 발생했습니다.",
+                    payload=None,
+                    note=str(exc),
+                )
+            )
+            return
 
-    def _packet_matches_ip(self, packet, ip_filter: str) -> bool:
-        if IP in packet:
-            src = packet[IP].src
-            dst = packet[IP].dst
-            return ip_filter in (src, dst)
-        return False
+    def stop_capture(self) -> None:
+        if not self.sniffer:
+            return
+        self.stop_event.set()
+        try:
+            self.sniffer.stop()
+            self.sniffer.join()
+        except Exception as exc:  # pragma: no cover - 예외 상황 기록용
+            self.packet_queue.put(
+                PacketDisplay(
+                    summary="[경고] 캡쳐 중지 과정에서 문제가 발생했습니다.",
+                    payload=None,
+                    note=str(exc),
+                )
+            )
+        finally:
+            self.sniffer = None
+            self.stop_event.clear()
+            self._set_running_state(False)
+
+    def _on_select_packet(self, _: tk.Event) -> None:
+        self._refresh_detail_view()
+
+    # ------------------------------------------------------------------
+    # 캡쳐 로직 및 필터
+    def _build_filter_config(self, ip_text: str, port_text: str) -> FilterConfig:
+        networks: list[NetworkType] = []
+        if ip_text:
+            try:
+                network = ipaddress.ip_network(ip_text, strict=False)
+            except ValueError as exc:
+                raise ValueError("유효한 IP 주소 또는 CIDR 표기법이 아닙니다.") from exc
+            networks.append(network)
+
+        port: Optional[int] = None
+        if port_text:
+            if not port_text.isdigit():
+                raise ValueError("포트 값은 0~65535 범위의 숫자여야 합니다.")
+            port = int(port_text)
+            if not 0 <= port <= 65535:
+                raise ValueError("포트 값은 0~65535 범위여야 합니다.")
+
+        return FilterConfig(networks=networks, port=port)
+
+    def _packet_matches_filter(self, packet, filter_config: FilterConfig) -> bool:
+        network_ok = True
+        if filter_config.networks:
+            addresses: list[str] = []
+            if IP in packet:
+                ip_layer = packet[IP]
+                addresses = [ip_layer.src, ip_layer.dst]
+            if not addresses and IPv6 in packet:
+                ip6_layer = packet[IPv6]
+                addresses = [ip6_layer.src, ip6_layer.dst]
+
+            if not addresses:
+                network_ok = False
+            else:
+                network_ok = False
+                for network in filter_config.networks:
+                    for addr in addresses:
+                        try:
+                            if ipaddress.ip_address(addr) in network:
+                                network_ok = True
+                                break
+                        except ValueError:
+                            continue
+                    if network_ok:
+                        break
+
+        port_ok = True
+        if filter_config.port is not None:
+            port = filter_config.port
+            port_ok = False
+            if TCP in packet:
+                tcp_layer = packet[TCP]
+                port_ok = port in (getattr(tcp_layer, "sport", None), getattr(tcp_layer, "dport", None))
+            if not port_ok and UDP in packet:
+                udp_layer = packet[UDP]
+                port_ok = port in (getattr(udp_layer, "sport", None), getattr(udp_layer, "dport", None))
+
+        return network_ok and port_ok
 
     @staticmethod
-    def _extract_payload(packet) -> str:
+    def _extract_payload_bytes(packet) -> Optional[bytes]:
         if Raw in packet:
             data = packet[Raw].load
             if isinstance(data, bytes):
-                return data.decode("utf-8", errors="replace")
-            return str(data)
-        return "(페이로드 없음)"
+                return data
+            if data is None:
+                return None
+            return bytes(str(data), "utf-8", "replace")
+        return None
 
     # ------------------------------------------------------------------
     # UI 보조 메서드
     def _poll_queue(self) -> None:
         while True:
             try:
-                summary, payload = self.packet_queue.get_nowait()
+                item = self.packet_queue.get_nowait()
             except queue.Empty:
                 break
             else:
-                if not hasattr(self, "packet_list_data"):
-                    self.packet_list_data = []
-                self.packet_list_data.append((summary, payload))
-                self.packet_list.insert(tk.END, summary)
+                self.packet_list_data.append(item)
+                self.packet_list.insert(tk.END, item.summary)
 
         self.master.after(200, self._poll_queue)
 
@@ -199,6 +310,89 @@ class PacketCaptureApp:
         self.detail_text.delete("1.0", tk.END)
         self.detail_text.insert(tk.END, text)
         self.detail_text.config(state=tk.DISABLED)
+
+    def _refresh_detail_view(self) -> None:
+        selection = self.packet_list.curselection()
+        if not selection:
+            self._set_detail_text("패킷을 선택하면 상세 정보가 여기에 표시됩니다.")
+            return
+
+        index = selection[0]
+        try:
+            item = self.packet_list_data[index]
+        except IndexError:  # pragma: no cover - 리스트 동기화 문제 방지용
+            return
+
+        detail_text = self._format_detail_text(item)
+        self._set_detail_text(detail_text)
+
+    def _format_detail_text(self, item: PacketDisplay) -> str:
+        lines = ["요약:", item.summary]
+        if item.note:
+            lines.extend(["", "비고:", item.note])
+
+        if item.payload is None:
+            lines.extend(["", "페이로드:", "(페이로드 없음)"])
+            return "\n".join(lines)
+
+        encoding = self.encoding_var.get()
+        lines.extend(["", f"텍스트 ({encoding}):"])
+        decode_message = ""
+        text_truncated = False
+        try:
+            decoded = item.payload.decode(encoding)
+        except UnicodeDecodeError:
+            decoded = item.payload.decode(encoding, errors="replace")
+            decode_message = "(일부 문자를 대체하여 표시합니다.)"
+
+        if decode_message:
+            lines.append(decode_message)
+        if decoded and len(decoded) > 4096:
+            decoded = decoded[:4096]
+            text_truncated = True
+        lines.append(decoded if decoded else "(텍스트 데이터 없음)")
+
+        if text_truncated:
+            lines.append("(텍스트 출력이 길이 제한으로 잘렸습니다.)")
+
+        hex_dump, truncated = self._hex_dump(item.payload)
+        lines.extend(["", "HEX 덤프:", hex_dump])
+        if truncated:
+            lines.append("(일부 데이터는 길이 제한으로 생략되었습니다.)")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _hex_dump(data: bytes, max_length: int = 2048) -> tuple[str, bool]:
+        if not data:
+            return "(데이터 없음)", False
+
+        shown = data[:max_length]
+        lines = []
+        for offset in range(0, len(shown), 16):
+            chunk = shown[offset : offset + 16]
+            hex_part = " ".join(f"{byte:02X}" for byte in chunk)
+            ascii_part = "".join(chr(byte) if 32 <= byte <= 126 else "." for byte in chunk)
+            lines.append(f"{offset:08X}  {hex_part:<47}  {ascii_part}")
+
+        truncated = len(data) > max_length
+        return "\n".join(lines), truncated
+
+    def _on_change_encoding(self, _: tk.Event | None = None) -> None:
+        self._refresh_detail_view()
+
+    def _clear_capture_results(self) -> None:
+        self.packet_list.delete(0, tk.END)
+        self.packet_list_data.clear()
+        self._set_detail_text("캡쳐를 시작하면 패킷이 여기에 표시됩니다.")
+
+    def _set_running_state(self, running: bool) -> None:
+        self.start_button.config(state=tk.DISABLED if running else tk.NORMAL)
+        self.stop_button.config(state=tk.NORMAL if running else tk.DISABLED)
+
+    def _on_close(self) -> None:
+        self.stop_capture()
+        self.master.destroy()
 
 
 def main() -> None:

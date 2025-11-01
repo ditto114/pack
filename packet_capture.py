@@ -8,10 +8,12 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import queue
 import threading
 import tkinter as tk
 from dataclasses import dataclass
+from pathlib import Path
 from tkinter import messagebox, ttk
 from typing import Optional, Union
 
@@ -29,6 +31,8 @@ class PacketDisplay:
     payload: Optional[bytes]
     note: Optional[str] = None
     utf8_text: Optional[str] = None
+    identifier: int = 0
+    preview: str = ""
 
 
 NetworkType = Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
@@ -47,16 +51,20 @@ class PacketCaptureApp:
     확인 기능을 제공한다.
     """
 
+    DEFAULT_MAX_PACKETS = 500
+
     def __init__(self, master: tk.Tk) -> None:
         self.master = master
         self.master.title("패킷 캡쳐 도구")
         self.packet_queue: "queue.Queue[PacketDisplay]" = queue.Queue()
         self.packet_list_data: list[PacketDisplay] = []
-        self.display_indices: list[int] = []
         self.stop_event = threading.Event()
         self.sniffer: Optional[AsyncSniffer] = None
+        self.packet_counter = 0
+        self.settings_path = Path(__file__).resolve().with_name("packet_capture_settings.json")
 
         self._build_widgets()
+        self._load_settings()
         self._poll_queue()
         self.master.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -103,6 +111,16 @@ class PacketCaptureApp:
         )
         self.text_filter_var.trace_add("write", self._on_text_filter_change)
 
+        ttk.Label(filter_frame, text="표시 최대 패킷 수").grid(
+            row=3, column=0, padx=(8, 4), pady=(0, 8)
+        )
+        self.max_packets_var = tk.StringVar(value=str(self.DEFAULT_MAX_PACKETS))
+        self.max_packets_entry = ttk.Entry(filter_frame, textvariable=self.max_packets_var)
+        self.max_packets_entry.grid(row=3, column=1, sticky="ew", padx=(0, 8), pady=(0, 8))
+        ttk.Label(filter_frame, text="(최대값 초과 시 오래된 패킷을 삭제)").grid(
+            row=3, column=2, columnspan=2, padx=(0, 8), pady=(0, 8), sticky="w"
+        )
+
         # 제어 버튼
         button_frame = ttk.Frame(main_frame)
         button_frame.grid(row=1, column=0, sticky="ew", pady=(0, 8))
@@ -119,13 +137,23 @@ class PacketCaptureApp:
         packet_frame.columnconfigure(0, weight=1)
         packet_frame.rowconfigure(0, weight=1)
 
-        self.packet_list = tk.Listbox(packet_frame, height=12)
-        self.packet_list.grid(row=0, column=0, sticky="nsew")
-        self.packet_list.bind("<<ListboxSelect>>", self._on_select_packet)
+        columns = ("summary", "preview")
+        self.packet_tree = ttk.Treeview(
+            packet_frame,
+            columns=columns,
+            show="headings",
+            selectmode="browse",
+        )
+        self.packet_tree.heading("summary", text="요약")
+        self.packet_tree.heading("preview", text="미리보기(한글)")
+        self.packet_tree.column("summary", anchor="w", stretch=True)
+        self.packet_tree.column("preview", anchor="w", width=200, stretch=False)
+        self.packet_tree.grid(row=0, column=0, sticky="nsew")
+        self.packet_tree.bind("<<TreeviewSelect>>", self._on_select_packet)
 
-        scrollbar = ttk.Scrollbar(packet_frame, orient=tk.VERTICAL, command=self.packet_list.yview)
+        scrollbar = ttk.Scrollbar(packet_frame, orient=tk.VERTICAL, command=self.packet_tree.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
-        self.packet_list.configure(yscrollcommand=scrollbar.set)
+        self.packet_tree.configure(yscrollcommand=scrollbar.set)
 
         # 패킷 상세
         detail_frame = ttk.LabelFrame(main_frame, text="패킷 상세 및 페이로드")
@@ -152,7 +180,10 @@ class PacketCaptureApp:
         self.detail_text.grid(row=1, column=0, sticky="nsew")
         detail_scroll = ttk.Scrollbar(detail_frame, orient=tk.VERTICAL, command=self.detail_text.yview)
         detail_scroll.grid(row=1, column=1, sticky="ns")
-        self.detail_text.configure(yscrollcommand=detail_scroll.set, state=tk.DISABLED)
+        self.detail_text.configure(yscrollcommand=detail_scroll.set, state=tk.NORMAL)
+        self.detail_text.bind("<Key>", self._prevent_detail_edit)
+        self.detail_text.bind("<<Paste>>", lambda _event: "break")
+        self.detail_text.bind("<Button-3>", lambda _event: "break")
         self._set_detail_text("캡쳐를 시작하면 패킷이 여기에 표시됩니다.")
 
     # ------------------------------------------------------------------
@@ -185,8 +216,14 @@ class PacketCaptureApp:
                     utf8_text = payload.decode("utf-8")
                 except UnicodeDecodeError:
                     utf8_text = payload.decode("utf-8", errors="replace")
+            preview = self._extract_hangul_preview(utf8_text)
             self.packet_queue.put(
-                PacketDisplay(summary=summary, payload=payload, utf8_text=utf8_text)
+                PacketDisplay(
+                    summary=summary,
+                    payload=payload,
+                    utf8_text=utf8_text,
+                    preview=preview,
+                )
             )
 
         self.sniffer = AsyncSniffer(
@@ -319,14 +356,31 @@ class PacketCaptureApp:
     # UI 보조 메서드
     def _poll_queue(self) -> None:
         updated = False
+        max_packets = self._get_max_packets()
         while True:
             try:
                 item = self.packet_queue.get_nowait()
             except queue.Empty:
                 break
             else:
+                self.packet_counter += 1
+                item.identifier = self.packet_counter
+                if not item.preview:
+                    item.preview = self._extract_hangul_preview(item.utf8_text)
                 self.packet_list_data.append(item)
+                if max_packets and max_packets > 0:
+                    while len(self.packet_list_data) > max_packets:
+                        removed = self.packet_list_data.pop(0)
+                        if self.packet_tree.exists(str(removed.identifier)):
+                            self.packet_tree.delete(str(removed.identifier))
                 updated = True
+
+        if max_packets and max_packets > 0 and len(self.packet_list_data) > max_packets:
+            while len(self.packet_list_data) > max_packets:
+                removed = self.packet_list_data.pop(0)
+                if self.packet_tree.exists(str(removed.identifier)):
+                    self.packet_tree.delete(str(removed.identifier))
+            updated = True
 
         if updated:
             self._refresh_packet_list()
@@ -337,19 +391,17 @@ class PacketCaptureApp:
         self.detail_text.config(state=tk.NORMAL)
         self.detail_text.delete("1.0", tk.END)
         self.detail_text.insert(tk.END, text)
-        self.detail_text.config(state=tk.DISABLED)
 
     def _refresh_detail_view(self) -> None:
-        selection = self.packet_list.curselection()
+        selection = self.packet_tree.selection()
         if not selection:
             self._set_detail_text("패킷을 선택하면 상세 정보가 여기에 표시됩니다.")
             return
 
-        index = selection[0]
-        try:
-            actual_index = self.display_indices[index]
-            item = self.packet_list_data[actual_index]
-        except IndexError:  # pragma: no cover - 리스트 동기화 문제 방지용
+        selected_id = selection[0]
+        item = next((pkt for pkt in self.packet_list_data if str(pkt.identifier) == selected_id), None)
+        if item is None:
+            self._set_detail_text("패킷을 선택하면 상세 정보가 여기에 표시됩니다.")
             return
 
         detail_text = self._format_detail_text(item)
@@ -412,34 +464,37 @@ class PacketCaptureApp:
 
     def _on_text_filter_change(self, *_: object) -> None:
         self._refresh_packet_list()
-        self._refresh_detail_view()
 
     def _refresh_packet_list(self) -> None:
-        selection = self.packet_list.curselection()
-        selected_actual_index = None
-        if selection:
-            displayed_index = selection[0]
-            if 0 <= displayed_index < len(self.display_indices):
-                selected_actual_index = self.display_indices[displayed_index]
-
         filter_text = self.text_filter_var.get().strip().lower()
+        previous_selection = self.packet_tree.selection()
+        selected_id = previous_selection[0] if previous_selection else None
 
-        self.packet_list.delete(0, tk.END)
-        self.display_indices.clear()
+        for child in self.packet_tree.get_children():
+            self.packet_tree.delete(child)
 
-        for idx, item in enumerate(self.packet_list_data):
+        visible_ids: list[str] = []
+        for item in self.packet_list_data:
             if self._matches_text_filter(item, filter_text):
-                self.packet_list.insert(tk.END, item.summary)
-                self.display_indices.append(idx)
+                if not item.preview:
+                    item.preview = self._extract_hangul_preview(item.utf8_text)
+                iid = str(item.identifier)
+                self.packet_tree.insert("", tk.END, iid=iid, values=(item.summary, item.preview))
+                visible_ids.append(iid)
 
-        if selected_actual_index is not None:
-            try:
-                new_index = self.display_indices.index(selected_actual_index)
-            except ValueError:
-                pass
-            else:
-                self.packet_list.selection_set(new_index)
-                self.packet_list.see(new_index)
+        if selected_id and selected_id in visible_ids:
+            self.packet_tree.selection_set(selected_id)
+            self.packet_tree.see(selected_id)
+        elif visible_ids:
+            last_id = visible_ids[-1]
+            self.packet_tree.selection_set(last_id)
+            self.packet_tree.see(last_id)
+        else:
+            current_selection = self.packet_tree.selection()
+            if current_selection:
+                self.packet_tree.selection_remove(*current_selection)
+
+        self._refresh_detail_view()
 
     @staticmethod
     def _matches_text_filter(item: PacketDisplay, filter_text: str) -> bool:
@@ -450,9 +505,10 @@ class PacketCaptureApp:
         return filter_text in item.utf8_text.lower()
 
     def _clear_capture_results(self) -> None:
-        self.packet_list.delete(0, tk.END)
         self.packet_list_data.clear()
-        self.display_indices.clear()
+        for child in self.packet_tree.get_children():
+            self.packet_tree.delete(child)
+        self.packet_counter = 0
         self._set_detail_text("캡쳐를 시작하면 패킷이 여기에 표시됩니다.")
 
     def _set_running_state(self, running: bool) -> None:
@@ -461,7 +517,87 @@ class PacketCaptureApp:
 
     def _on_close(self) -> None:
         self.stop_capture()
+        self._save_settings()
         self.master.destroy()
+
+    def _prevent_detail_edit(self, event: tk.Event) -> str | None:
+        allowed_navigation = {
+            "Left",
+            "Right",
+            "Up",
+            "Down",
+            "Home",
+            "End",
+            "Prior",
+            "Next",
+        }
+        if event.keysym in allowed_navigation:
+            return None
+        if event.state & 0x4 and event.keysym.lower() in {"c", "a"}:
+            return None
+        if event.keysym == "Escape":
+            return None
+        return "break"
+
+    def _get_max_packets(self) -> int:
+        raw_value = self.max_packets_var.get().strip()
+        try:
+            parsed = int(raw_value)
+        except ValueError:
+            return self.DEFAULT_MAX_PACKETS
+        if parsed <= 0:
+            return self.DEFAULT_MAX_PACKETS
+        return parsed
+
+    @staticmethod
+    def _extract_hangul_preview(text: Optional[str], limit: int = 10) -> str:
+        if not text:
+            return ""
+        preview_chars: list[str] = []
+        for ch in text:
+            if "\uAC00" <= ch <= "\uD7A3":
+                preview_chars.append(ch)
+                if len(preview_chars) >= limit:
+                    break
+        return "".join(preview_chars)
+
+    def _save_settings(self) -> None:
+        data = {
+            "ip": self.ip_entry.get().strip(),
+            "port": self.port_entry.get().strip(),
+            "text_filter": self.text_filter_var.get().strip(),
+            "max_packets": self.max_packets_var.get().strip(),
+        }
+        try:
+            with self.settings_path.open("w", encoding="utf-8") as fp:
+                json.dump(data, fp, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+
+    def _load_settings(self) -> None:
+        try:
+            with self.settings_path.open("r", encoding="utf-8") as fp:
+                data = json.load(fp)
+        except (OSError, json.JSONDecodeError):
+            return
+
+        ip_value = data.get("ip")
+        if isinstance(ip_value, str):
+            self.ip_entry.delete(0, tk.END)
+            self.ip_entry.insert(0, ip_value)
+
+        port_value = data.get("port")
+        if isinstance(port_value, str):
+            self.port_entry.delete(0, tk.END)
+            self.port_entry.insert(0, port_value)
+
+        text_filter_value = data.get("text_filter")
+        if isinstance(text_filter_value, str):
+            self.text_filter_var.set(text_filter_value)
+
+        max_packets_value = data.get("max_packets")
+        if isinstance(max_packets_value, str) and max_packets_value.strip():
+            self.max_packets_var.set(max_packets_value)
 
 
 def main() -> None:

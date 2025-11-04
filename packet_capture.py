@@ -51,6 +51,15 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/122.0 Safari/537.36"
 )
+DEFAULT_REQUEST_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;"
+        "q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
+    ),
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Connection": "keep-alive",
+}
 FRIEND_CODE_PATTERN = re.compile(r"^/profile/([A-Za-z0-9]{5})$")
 
 
@@ -93,13 +102,49 @@ class FriendListParser(HTMLParser):
             self._current_ppsn = None
 
 
-def fetch_html(url: str) -> str:
-    """지정된 URL에서 HTML 문서를 가져온다."""
+def fetch_html(
+    url: str,
+    *,
+    referer: Optional[str] = None,
+    retries: int = 2,
+    timeout: int = 10,
+) -> str:
+    """지정된 URL에서 HTML 문서를 가져온다.
 
-    request = Request(url, headers={"User-Agent": USER_AGENT})
-    with urlopen(request) as response:
-        charset = response.headers.get_content_charset() or "utf-8"
-        return response.read().decode(charset, "ignore")
+    MapleStory Worlds 측의 접근 제어로 403 오류가 발생할 수 있으므로 현실적인 헤더를
+    사용하고 동일 오류가 발생하면 재시도한다.
+    """
+
+    headers = dict(DEFAULT_REQUEST_HEADERS)
+    headers.setdefault("Referer", referer or BASE_URL + "/")
+
+    last_error: Optional[Exception] = None
+    for attempt in range(retries + 1):
+        try:
+            request = Request(url, headers=headers)
+            with urlopen(request, timeout=timeout) as response:
+                charset = response.headers.get_content_charset() or "utf-8"
+                return response.read().decode(charset, "ignore")
+        except HTTPError as exc:
+            last_error = exc
+            if exc.code in (403, 429) and attempt < retries:
+                time.sleep(1 + attempt)
+                continue
+            if exc.code == 403:
+                raise RuntimeError(
+                    "서버에서 요청을 거부했습니다(403 Forbidden). 잠시 후 다시 시도하거나 "
+                    "네트워크 환경을 확인하세요."
+                ) from exc
+            raise
+        except URLError as exc:
+            last_error = exc
+            if attempt < retries:
+                time.sleep(1 + attempt)
+                continue
+            raise
+
+    assert last_error is not None
+    raise last_error
 
 
 def extract_friend_codes_from_profile(html: str) -> list[str]:
@@ -116,7 +161,7 @@ def extract_entries_from_friends_page(html: str) -> list[tuple[str, str]]:
 
 def get_initial_friends(target_code: str) -> list[str]:
     profile_url = PROFILE_URL.format(code=target_code)
-    html = fetch_html(profile_url)
+    html = fetch_html(profile_url, referer=BASE_URL + "/ko")
     codes = extract_friend_codes_from_profile(html)
     if not codes:
         raise RuntimeError(
@@ -131,7 +176,7 @@ def iter_friend_pages(friend_code: str, *, delay: float = 0.5) -> Iterable[list[
     while True:
         url = FRIENDS_PAGE_URL.format(code=friend_code, page=page)
         try:
-            html = fetch_html(url)
+            html = fetch_html(url, referer=PROFILE_URL.format(code=friend_code))
         except HTTPError as exc:
             if exc.code == 404:
                 break

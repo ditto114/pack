@@ -10,12 +10,17 @@ from __future__ import annotations
 import ipaddress
 import json
 import queue
+import re
 import threading
+import time
 import tkinter as tk
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from pathlib import Path
 from tkinter import messagebox, ttk
-from typing import Optional, Union
+from typing import Callable, Iterable, Optional, Union
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 try:
     from scapy.all import AsyncSniffer, IP, IPv6, Raw, TCP, UDP  # type: ignore
@@ -36,6 +41,144 @@ class PacketDisplay:
 
 
 NetworkType = Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
+
+
+BASE_URL = "https://maplestoryworlds.nexon.com"
+PROFILE_URL = BASE_URL + "/ko/profile/{code}"
+FRIENDS_PAGE_URL = BASE_URL + "/profile/{code}/friends?type=friends&page={page}"
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/122.0 Safari/537.36"
+)
+FRIEND_CODE_PATTERN = re.compile(r"^/profile/([A-Za-z0-9]{5})$")
+
+
+class FriendListParser(HTMLParser):
+    """MapleStory Worlds 친구 목록에서 (친구코드, PPSN) 쌍을 추출하는 파서."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._within_friend_section = False
+        self._current_ppsn: Optional[str] = None
+        self.entries: list[tuple[str, str]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
+        attrs_dict = {key: value for key, value in attrs if value is not None}
+
+        if tag == "section":
+            class_name = attrs_dict.get("class", "")
+            if "section_friend" in class_name:
+                self._within_friend_section = True
+
+        if not self._within_friend_section:
+            return
+
+        if "ppsn" in attrs_dict:
+            self._current_ppsn = attrs_dict["ppsn"]
+
+        if tag == "a" and "href" in attrs_dict:
+            match = FRIEND_CODE_PATTERN.match(attrs_dict["href"])
+            if match:
+                code = match.group(1)
+                ppsn = attrs_dict.get("ppsn", self._current_ppsn)
+                if ppsn:
+                    self.entries.append((code, ppsn))
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "section" and self._within_friend_section:
+            self._within_friend_section = False
+            self._current_ppsn = None
+        elif tag == "li":
+            self._current_ppsn = None
+
+
+def fetch_html(url: str) -> str:
+    """지정된 URL에서 HTML 문서를 가져온다."""
+
+    request = Request(url, headers={"User-Agent": USER_AGENT})
+    with urlopen(request) as response:
+        charset = response.headers.get_content_charset() or "utf-8"
+        return response.read().decode(charset, "ignore")
+
+
+def extract_friend_codes_from_profile(html: str) -> list[str]:
+    parser = FriendListParser()
+    parser.feed(html)
+    return [code for code, _ in parser.entries]
+
+
+def extract_entries_from_friends_page(html: str) -> list[tuple[str, str]]:
+    parser = FriendListParser()
+    parser.feed(html)
+    return parser.entries
+
+
+def get_initial_friends(target_code: str) -> list[str]:
+    profile_url = PROFILE_URL.format(code=target_code)
+    html = fetch_html(profile_url)
+    codes = extract_friend_codes_from_profile(html)
+    if not codes:
+        raise RuntimeError(
+            "프로필 페이지에서 친구 목록을 찾지 못했습니다. 친구 코드가 올바른지 확인하세요."
+        )
+    return codes
+
+
+def iter_friend_pages(friend_code: str, *, delay: float = 0.5) -> Iterable[list[tuple[str, str]]]:
+    page = 1
+    seen_empty = 0
+    while True:
+        url = FRIENDS_PAGE_URL.format(code=friend_code, page=page)
+        try:
+            html = fetch_html(url)
+        except HTTPError as exc:
+            if exc.code == 404:
+                break
+            raise
+        entries = extract_entries_from_friends_page(html)
+        if not entries:
+            seen_empty += 1
+            if seen_empty >= 2:
+                break
+        else:
+            seen_empty = 0
+            yield entries
+        page += 1
+        if delay:
+            time.sleep(delay)
+
+
+def find_ppsn(
+    target_code: str,
+    *,
+    delay: float = 0.5,
+    logger: Optional[Callable[[str], None]] = None,
+) -> Optional[tuple[str, str]]:
+    """친구 코드에 해당하는 PPSN을 탐색한다."""
+
+    target_code_upper = target_code.upper()
+    log = logger or (lambda message: None)
+
+    friends = get_initial_friends(target_code)
+    log(f"[정보] 초기 친구 {len(friends)}명을 확인했습니다.")
+
+    for friend_code in friends:
+        log(f"[정보] 친구 {friend_code} 의 목록을 탐색합니다...")
+        try:
+            for entries in iter_friend_pages(friend_code, delay=delay):
+                for code, ppsn in entries:
+                    if code.upper() == target_code_upper:
+                        log(
+                            f"[결과] 친구 {friend_code} 의 목록에서 대상 코드를 찾았습니다."
+                        )
+                        return ppsn, friend_code
+        except URLError as exc:
+            log(f"[경고] {friend_code} 의 친구 목록을 불러오지 못했습니다: {exc}")
+        except HTTPError as exc:
+            log(f"[경고] {friend_code} 의 친구 목록 요청 실패({exc.code}): {exc.reason}")
+
+    return None
 
 
 @dataclass
@@ -62,10 +205,14 @@ class PacketCaptureApp:
         self.sniffer: Optional[AsyncSniffer] = None
         self.packet_counter = 0
         self.settings_path = Path(__file__).resolve().with_name("packet_capture_settings.json")
+        self.ppsn_queue: "queue.Queue[dict[str, object]]" = queue.Queue()
+        self.ppsn_thread: Optional[threading.Thread] = None
+        self.ppsn_running = False
 
         self._build_widgets()
         self._load_settings()
         self._poll_queue()
+        self._poll_ppsn_queue()
         self.master.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ------------------------------------------------------------------
@@ -124,12 +271,18 @@ class PacketCaptureApp:
         # 제어 버튼
         button_frame = ttk.Frame(main_frame)
         button_frame.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-        button_frame.columnconfigure((0, 1), weight=1)
+        button_frame.columnconfigure((0, 1, 2), weight=1)
 
         self.start_button = ttk.Button(button_frame, text="캡쳐 시작", command=self.start_capture)
         self.start_button.grid(row=0, column=0, padx=4, sticky="ew")
         self.stop_button = ttk.Button(button_frame, text="캡쳐 중지", command=self.stop_capture, state=tk.DISABLED)
         self.stop_button.grid(row=0, column=1, padx=4, sticky="ew")
+        self.ppsn_toggle_button = ttk.Button(
+            button_frame,
+            text="PPSN 찾기",
+            command=self._toggle_ppsn_panel,
+        )
+        self.ppsn_toggle_button.grid(row=0, column=2, padx=4, sticky="ew")
 
         # 패킷 리스트
         packet_frame = ttk.LabelFrame(main_frame, text="캡쳐된 패킷")
@@ -185,6 +338,57 @@ class PacketCaptureApp:
         self.detail_text.bind("<<Paste>>", lambda _event: "break")
         self.detail_text.bind("<Button-3>", lambda _event: "break")
         self._set_detail_text("캡쳐를 시작하면 패킷이 여기에 표시됩니다.")
+
+        self.ppsn_frame = ttk.LabelFrame(main_frame, text="PPSN 찾기", padding=8)
+        self.ppsn_frame.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        self.ppsn_frame.columnconfigure(1, weight=1)
+        self.ppsn_frame.columnconfigure(3, weight=1)
+
+        ttk.Label(self.ppsn_frame, text="친구 코드 (5글자)").grid(
+            row=0, column=0, sticky="w", padx=(0, 8), pady=(0, 4)
+        )
+        self.ppsn_code_var = tk.StringVar()
+        self.ppsn_code_entry = ttk.Entry(self.ppsn_frame, textvariable=self.ppsn_code_var, width=12)
+        self.ppsn_code_entry.grid(row=0, column=1, sticky="ew", pady=(0, 4))
+
+        ttk.Label(self.ppsn_frame, text="요청 간 대기 (초)").grid(
+            row=0, column=2, sticky="w", padx=(12, 8), pady=(0, 4)
+        )
+        self.ppsn_delay_var = tk.StringVar(value="0.5")
+        self.ppsn_delay_entry = ttk.Entry(self.ppsn_frame, textvariable=self.ppsn_delay_var, width=10)
+        self.ppsn_delay_entry.grid(row=0, column=3, sticky="ew", pady=(0, 4))
+
+        self.ppsn_search_button = ttk.Button(
+            self.ppsn_frame,
+            text="검색",
+            command=self._on_ppsn_search,
+        )
+        self.ppsn_search_button.grid(row=0, column=4, padx=(12, 0), pady=(0, 4))
+
+        ttk.Label(self.ppsn_frame, text="검색 로그").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.ppsn_log = tk.Text(self.ppsn_frame, height=8, state=tk.DISABLED, wrap="word")
+        self.ppsn_log.grid(row=2, column=0, columnspan=5, sticky="ew", pady=(0, 4))
+        log_scroll = ttk.Scrollbar(self.ppsn_frame, orient=tk.VERTICAL, command=self.ppsn_log.yview)
+        log_scroll.grid(row=2, column=5, sticky="ns", pady=(0, 4))
+        self.ppsn_log.configure(yscrollcommand=log_scroll.set)
+
+        ttk.Label(self.ppsn_frame, text="결과 PPSN").grid(row=3, column=0, sticky="w", pady=(4, 0))
+        self.ppsn_result_var = tk.StringVar()
+        self.ppsn_result_entry = ttk.Entry(
+            self.ppsn_frame,
+            textvariable=self.ppsn_result_var,
+            state="readonly",
+        )
+        self.ppsn_result_entry.grid(row=3, column=1, columnspan=3, sticky="ew", pady=(4, 0))
+        self.ppsn_copy_button = ttk.Button(
+            self.ppsn_frame,
+            text="복사",
+            command=self._copy_ppsn_result,
+            state=tk.DISABLED,
+        )
+        self.ppsn_copy_button.grid(row=3, column=4, padx=(12, 0), pady=(4, 0))
+
+        self.ppsn_frame.grid_remove()
 
     # ------------------------------------------------------------------
     # 이벤트 핸들러
@@ -280,6 +484,144 @@ class PacketCaptureApp:
 
     def _on_select_packet(self, _: tk.Event) -> None:
         self._refresh_detail_view()
+
+    # ------------------------------------------------------------------
+    # PPSN 찾기 기능
+    def _toggle_ppsn_panel(self) -> None:
+        if self.ppsn_frame.winfo_ismapped():
+            self.ppsn_frame.grid_remove()
+            self.ppsn_toggle_button.config(text="PPSN 찾기")
+        else:
+            self.ppsn_frame.grid()
+            self.ppsn_toggle_button.config(text="PPSN 닫기")
+            self.ppsn_code_entry.focus_set()
+
+    def _on_ppsn_search(self) -> None:
+        if self.ppsn_running:
+            messagebox.showinfo("알림", "PPSN 검색이 진행 중입니다.")
+            return
+
+        code = self.ppsn_code_var.get().strip()
+        if not re.fullmatch(r"[A-Za-z0-9]{5}", code):
+            messagebox.showerror("입력 오류", "친구 코드는 영문 대소문자/숫자의 5글자여야 합니다.")
+            self.ppsn_code_entry.focus_set()
+            return
+
+        delay_text = self.ppsn_delay_var.get().strip() or "0.5"
+        try:
+            delay = float(delay_text)
+        except ValueError:
+            messagebox.showerror("입력 오류", "대기 시간은 숫자 형식이어야 합니다.")
+            self.ppsn_delay_entry.focus_set()
+            return
+
+        if delay < 0:
+            messagebox.showerror("입력 오류", "대기 시간은 0 이상이어야 합니다.")
+            self.ppsn_delay_entry.focus_set()
+            return
+
+        self.ppsn_running = True
+        self.ppsn_search_button.config(state=tk.DISABLED)
+        self.ppsn_copy_button.config(state=tk.DISABLED)
+        self.ppsn_result_var.set("")
+        self._clear_ppsn_log()
+        self._append_ppsn_log("[정보] PPSN 검색을 시작합니다.")
+
+        self.ppsn_thread = threading.Thread(
+            target=self._run_ppsn_lookup,
+            args=(code, delay),
+            daemon=True,
+        )
+        self.ppsn_thread.start()
+
+    def _run_ppsn_lookup(self, code: str, delay: float) -> None:
+        def log(message: str) -> None:
+            self.ppsn_queue.put({"type": "log", "text": message})
+
+        try:
+            result = find_ppsn(code, delay=delay, logger=log)
+        except HTTPError as exc:
+            self.ppsn_queue.put(
+                {
+                    "type": "done",
+                    "success": False,
+                    "text": f"[오류] 프로필 페이지 요청 실패({exc.code}): {exc.reason}",
+                }
+            )
+        except URLError as exc:
+            self.ppsn_queue.put(
+                {
+                    "type": "done",
+                    "success": False,
+                    "text": f"[오류] 네트워크 오류가 발생했습니다: {exc}",
+                }
+            )
+        except RuntimeError as exc:
+            self.ppsn_queue.put(
+                {
+                    "type": "done",
+                    "success": False,
+                    "text": f"[오류] {exc}",
+                }
+            )
+        except Exception as exc:  # pragma: no cover - 예기치 못한 예외 대비
+            self.ppsn_queue.put(
+                {
+                    "type": "done",
+                    "success": False,
+                    "text": f"[오류] 알 수 없는 오류가 발생했습니다: {exc}",
+                }
+            )
+        else:
+            if result is None:
+                self.ppsn_queue.put(
+                    {
+                        "type": "done",
+                        "success": False,
+                        "text": "[결과] 친구 목록 어디에서도 해당 친구 코드를 찾지 못했습니다.",
+                    }
+                )
+            else:
+                ppsn, via_friend = result
+                self.ppsn_queue.put(
+                    {
+                        "type": "done",
+                        "success": True,
+                        "text": (
+                            f"[결과] 친구 코드 {code.upper()} 의 PPSN은 {ppsn} 입니다. "
+                            f"(친구 {via_friend} 의 목록에서 확인)"
+                        ),
+                        "ppsn": ppsn,
+                    }
+                )
+        finally:
+            self.ppsn_queue.put({"type": "finished"})
+
+    def _clear_ppsn_log(self) -> None:
+        self.ppsn_log.config(state=tk.NORMAL)
+        self.ppsn_log.delete("1.0", tk.END)
+        self.ppsn_log.config(state=tk.DISABLED)
+
+    def _append_ppsn_log(self, message: str) -> None:
+        if not message:
+            return
+        self.ppsn_log.config(state=tk.NORMAL)
+        self.ppsn_log.insert(tk.END, message + "\n")
+        self.ppsn_log.see(tk.END)
+        self.ppsn_log.config(state=tk.DISABLED)
+
+    def _copy_ppsn_result(self) -> None:
+        result = self.ppsn_result_var.get().strip()
+        if not result:
+            messagebox.showinfo("알림", "복사할 PPSN 결과가 없습니다.")
+            return
+        try:
+            self.master.clipboard_clear()
+            self.master.clipboard_append(result)
+        except tk.TclError:
+            messagebox.showerror("오류", "클립보드에 접근할 수 없습니다.")
+            return
+        messagebox.showinfo("완료", "PPSN이 클립보드에 복사되었습니다.")
 
     # ------------------------------------------------------------------
     # 캡쳐 로직 및 필터
@@ -386,6 +728,39 @@ class PacketCaptureApp:
             self._refresh_packet_list()
 
         self.master.after(200, self._poll_queue)
+
+    def _poll_ppsn_queue(self) -> None:
+        has_done_message = False
+        while True:
+            try:
+                item = self.ppsn_queue.get_nowait()
+            except queue.Empty:
+                break
+            message_type = item.get("type")
+            if message_type == "log":
+                self._append_ppsn_log(item.get("text", ""))
+            elif message_type == "done":
+                text = item.get("text", "")
+                if text:
+                    self._append_ppsn_log(text)
+                success = bool(item.get("success"))
+                ppsn_value = item.get("ppsn")
+                if success and isinstance(ppsn_value, str) and ppsn_value:
+                    self.ppsn_result_var.set(ppsn_value)
+                    self.ppsn_copy_button.config(state=tk.NORMAL)
+                else:
+                    if isinstance(ppsn_value, str):
+                        self.ppsn_result_var.set(ppsn_value)
+                    self.ppsn_copy_button.config(state=tk.DISABLED)
+            elif message_type == "finished":
+                has_done_message = True
+
+        if has_done_message:
+            self.ppsn_running = False
+            self.ppsn_search_button.config(state=tk.NORMAL)
+            self.ppsn_thread = None
+
+        self.master.after(200, self._poll_ppsn_queue)
 
     def _set_detail_text(self, text: str) -> None:
         self.detail_text.config(state=tk.NORMAL)

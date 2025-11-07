@@ -11,6 +11,7 @@ import ipaddress
 import json
 import queue
 import re
+import socket
 import threading
 import time
 import tkinter as tk
@@ -38,6 +39,7 @@ class PacketDisplay:
     utf8_text: Optional[str] = None
     identifier: int = 0
     preview: str = ""
+    direction: str = "unknown"
 
 
 NetworkType = Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
@@ -61,6 +63,14 @@ DEFAULT_REQUEST_HEADERS = {
     "Connection": "keep-alive",
 }
 FRIEND_CODE_PATTERN = re.compile(r"^/profile/([A-Za-z0-9]{5})$")
+WORLD_ID_PATTERN = re.compile(
+    r"w\s*o\s*r\s*l\s*d\s*i\s*d[\s:=\"']*(\d{17})",
+    re.IGNORECASE,
+)
+CHANNEL_NAME_PATTERN = re.compile(
+    r"c\s*h\s*a\s*n\s*n\s*e\s*l\s*n\s*a\s*m\s*e[\s:=\"']*([A-Za-z]-[\uAC00-\uD7A3][0-9]{2,3})",
+    re.IGNORECASE,
+)
 
 
 class FriendListParser(HTMLParser):
@@ -253,6 +263,17 @@ class PacketCaptureApp:
         self.ppsn_queue: "queue.Queue[dict[str, object]]" = queue.Queue()
         self.ppsn_thread: Optional[threading.Thread] = None
         self.ppsn_running = False
+        self.local_addresses = self._detect_local_addresses()
+        self.direction_filter_var = tk.StringVar(value="전체")
+        self.world_match_entries: list[tuple[str, str]] = []
+        self.world_match_keys: set[tuple[str, str]] = set()
+        self.ppsn_window: Optional[tk.Toplevel] = None
+        self.ppsn_code_entry: Optional[ttk.Entry] = None
+        self.ppsn_delay_entry: Optional[ttk.Entry] = None
+        self.ppsn_search_button: Optional[ttk.Button] = None
+        self.ppsn_log: Optional[tk.Text] = None
+        self.ppsn_result_entry: Optional[ttk.Entry] = None
+        self.ppsn_copy_button: Optional[ttk.Button] = None
 
         self._build_widgets()
         self._load_settings()
@@ -269,7 +290,9 @@ class PacketCaptureApp:
         self.master.columnconfigure(0, weight=1)
         self.master.rowconfigure(0, weight=1)
         main_frame.columnconfigure(0, weight=1)
-        main_frame.rowconfigure(1, weight=1)
+        main_frame.columnconfigure(3, weight=0)
+        main_frame.rowconfigure(2, weight=1)
+        main_frame.rowconfigure(3, weight=1)
 
         # 필터 입력
         filter_frame = ttk.LabelFrame(main_frame, text="필터")
@@ -313,10 +336,26 @@ class PacketCaptureApp:
             row=3, column=2, columnspan=2, padx=(0, 8), pady=(0, 8), sticky="w"
         )
 
+        ttk.Label(filter_frame, text="패킷 방향").grid(
+            row=4, column=0, padx=(8, 4), pady=(0, 8)
+        )
+        self.direction_filter_combo = ttk.Combobox(
+            filter_frame,
+            textvariable=self.direction_filter_var,
+            values=("전체", "수신", "송신", "미확인"),
+            state="readonly",
+        )
+        self.direction_filter_combo.grid(row=4, column=1, sticky="ew", padx=(0, 8), pady=(0, 8))
+        self.direction_filter_combo.current(0)
+        self.direction_filter_combo.bind("<<ComboboxSelected>>", self._on_direction_filter_change)
+        ttk.Label(filter_frame, text="(방향 기준 필터링)").grid(
+            row=4, column=2, columnspan=2, padx=(0, 8), pady=(0, 8), sticky="w"
+        )
+
         # 제어 버튼
         button_frame = ttk.Frame(main_frame)
         button_frame.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-        button_frame.columnconfigure((0, 1, 2), weight=1)
+        button_frame.columnconfigure((0, 1, 2, 3), weight=1)
 
         self.start_button = ttk.Button(button_frame, text="캡쳐 시작", command=self.start_capture)
         self.start_button.grid(row=0, column=0, padx=4, sticky="ew")
@@ -328,6 +367,12 @@ class PacketCaptureApp:
             command=self._toggle_ppsn_panel,
         )
         self.ppsn_toggle_button.grid(row=0, column=2, padx=4, sticky="ew")
+        self.world_toggle_button = ttk.Button(
+            button_frame,
+            text="월드 매칭",
+            command=self._toggle_world_panel,
+        )
+        self.world_toggle_button.grid(row=0, column=3, padx=4, sticky="ew")
 
         # 패킷 리스트
         packet_frame = ttk.LabelFrame(main_frame, text="캡쳐된 패킷")
@@ -335,7 +380,7 @@ class PacketCaptureApp:
         packet_frame.columnconfigure(0, weight=1)
         packet_frame.rowconfigure(0, weight=1)
 
-        columns = ("summary", "preview")
+        columns = ("summary", "direction", "preview")
         self.packet_tree = ttk.Treeview(
             packet_frame,
             columns=columns,
@@ -343,8 +388,10 @@ class PacketCaptureApp:
             selectmode="browse",
         )
         self.packet_tree.heading("summary", text="요약")
+        self.packet_tree.heading("direction", text="방향")
         self.packet_tree.heading("preview", text="미리보기(한글)")
         self.packet_tree.column("summary", anchor="w", stretch=True)
+        self.packet_tree.column("direction", anchor="center", width=70, stretch=False)
         self.packet_tree.column("preview", anchor="w", width=200, stretch=False)
         self.packet_tree.grid(row=0, column=0, sticky="nsew")
         self.packet_tree.bind("<<TreeviewSelect>>", self._on_select_packet)
@@ -384,56 +431,37 @@ class PacketCaptureApp:
         self.detail_text.bind("<Button-3>", lambda _event: "break")
         self._set_detail_text("캡쳐를 시작하면 패킷이 여기에 표시됩니다.")
 
-        self.ppsn_frame = ttk.LabelFrame(main_frame, text="PPSN 찾기", padding=8)
-        self.ppsn_frame.grid(row=4, column=0, sticky="ew", pady=(8, 0))
-        self.ppsn_frame.columnconfigure(1, weight=1)
-        self.ppsn_frame.columnconfigure(3, weight=1)
-
-        ttk.Label(self.ppsn_frame, text="친구 코드 (5글자)").grid(
-            row=0, column=0, sticky="w", padx=(0, 8), pady=(0, 4)
-        )
         self.ppsn_code_var = tk.StringVar()
-        self.ppsn_code_entry = ttk.Entry(self.ppsn_frame, textvariable=self.ppsn_code_var, width=12)
-        self.ppsn_code_entry.grid(row=0, column=1, sticky="ew", pady=(0, 4))
-
-        ttk.Label(self.ppsn_frame, text="요청 간 대기 (초)").grid(
-            row=0, column=2, sticky="w", padx=(12, 8), pady=(0, 4)
-        )
         self.ppsn_delay_var = tk.StringVar(value="0.5")
-        self.ppsn_delay_entry = ttk.Entry(self.ppsn_frame, textvariable=self.ppsn_delay_var, width=10)
-        self.ppsn_delay_entry.grid(row=0, column=3, sticky="ew", pady=(0, 4))
-
-        self.ppsn_search_button = ttk.Button(
-            self.ppsn_frame,
-            text="검색",
-            command=self._on_ppsn_search,
-        )
-        self.ppsn_search_button.grid(row=0, column=4, padx=(12, 0), pady=(0, 4))
-
-        ttk.Label(self.ppsn_frame, text="검색 로그").grid(row=1, column=0, sticky="w", pady=(4, 0))
-        self.ppsn_log = tk.Text(self.ppsn_frame, height=8, state=tk.DISABLED, wrap="word")
-        self.ppsn_log.grid(row=2, column=0, columnspan=5, sticky="ew", pady=(0, 4))
-        log_scroll = ttk.Scrollbar(self.ppsn_frame, orient=tk.VERTICAL, command=self.ppsn_log.yview)
-        log_scroll.grid(row=2, column=5, sticky="ns", pady=(0, 4))
-        self.ppsn_log.configure(yscrollcommand=log_scroll.set)
-
-        ttk.Label(self.ppsn_frame, text="결과 PPSN").grid(row=3, column=0, sticky="w", pady=(4, 0))
         self.ppsn_result_var = tk.StringVar()
-        self.ppsn_result_entry = ttk.Entry(
-            self.ppsn_frame,
-            textvariable=self.ppsn_result_var,
-            state="readonly",
-        )
-        self.ppsn_result_entry.grid(row=3, column=1, columnspan=3, sticky="ew", pady=(4, 0))
-        self.ppsn_copy_button = ttk.Button(
-            self.ppsn_frame,
-            text="복사",
-            command=self._copy_ppsn_result,
-            state=tk.DISABLED,
-        )
-        self.ppsn_copy_button.grid(row=3, column=4, padx=(12, 0), pady=(4, 0))
 
-        self.ppsn_frame.grid_remove()
+        self.world_panel = ttk.LabelFrame(main_frame, text="월드 매칭", padding=8)
+        self.world_panel.grid(row=0, column=3, rowspan=4, sticky="nsew", padx=(12, 0))
+        self.world_panel.columnconfigure(0, weight=1)
+        self.world_panel.rowconfigure(1, weight=1)
+
+        ttk.Label(self.world_panel, text="감지된 월드-채널 매칭").grid(
+            row=0, column=0, sticky="w", pady=(0, 4)
+        )
+        world_columns = ("channel", "world")
+        self.world_tree = ttk.Treeview(
+            self.world_panel,
+            columns=world_columns,
+            show="headings",
+            selectmode="browse",
+            height=12,
+        )
+        self.world_tree.heading("channel", text="채널 이름")
+        self.world_tree.heading("world", text="월드 코드")
+        self.world_tree.column("channel", anchor="w", width=120, stretch=True)
+        self.world_tree.column("world", anchor="w", width=180, stretch=True)
+        self.world_tree.grid(row=1, column=0, sticky="nsew")
+
+        world_scroll = ttk.Scrollbar(self.world_panel, orient=tk.VERTICAL, command=self.world_tree.yview)
+        world_scroll.grid(row=1, column=1, sticky="ns")
+        self.world_tree.configure(yscrollcommand=world_scroll.set)
+
+        self.world_panel.grid_remove()
 
     # ------------------------------------------------------------------
     # 이벤트 핸들러
@@ -459,6 +487,7 @@ class PacketCaptureApp:
 
             payload = self._extract_payload_bytes(packet)
             summary = packet.summary()
+            direction = self._determine_direction(packet)
             utf8_text = None
             if payload:
                 try:
@@ -472,6 +501,7 @@ class PacketCaptureApp:
                     payload=payload,
                     utf8_text=utf8_text,
                     preview=preview,
+                    direction=direction,
                 )
             )
 
@@ -533,13 +563,85 @@ class PacketCaptureApp:
     # ------------------------------------------------------------------
     # PPSN 찾기 기능
     def _toggle_ppsn_panel(self) -> None:
-        if self.ppsn_frame.winfo_ismapped():
-            self.ppsn_frame.grid_remove()
-            self.ppsn_toggle_button.config(text="PPSN 찾기")
-        else:
-            self.ppsn_frame.grid()
-            self.ppsn_toggle_button.config(text="PPSN 닫기")
-            self.ppsn_code_entry.focus_set()
+        if self.ppsn_window and self.ppsn_window.winfo_exists():
+            self.ppsn_window.deiconify()
+            self.ppsn_window.lift()
+            self.ppsn_window.focus_force()
+            if self.ppsn_code_entry:
+                self.ppsn_code_entry.focus_set()
+            return
+
+        self._create_ppsn_window()
+
+    def _create_ppsn_window(self) -> None:
+        window = tk.Toplevel(self.master)
+        window.title("PPSN 찾기")
+        window.transient(self.master)
+
+        frame = ttk.Frame(window, padding=12)
+        frame.grid(row=0, column=0, sticky="nsew")
+        window.columnconfigure(0, weight=1)
+        window.rowconfigure(0, weight=1)
+        frame.columnconfigure(1, weight=1)
+        frame.columnconfigure(3, weight=1)
+
+        ttk.Label(frame, text="친구 코드 (5글자)").grid(
+            row=0, column=0, sticky="w", padx=(0, 8), pady=(0, 4)
+        )
+        self.ppsn_code_entry = ttk.Entry(frame, textvariable=self.ppsn_code_var, width=12)
+        self.ppsn_code_entry.grid(row=0, column=1, sticky="ew", pady=(0, 4))
+
+        ttk.Label(frame, text="요청 간 대기 (초)").grid(
+            row=0, column=2, sticky="w", padx=(12, 8), pady=(0, 4)
+        )
+        self.ppsn_delay_entry = ttk.Entry(frame, textvariable=self.ppsn_delay_var, width=10)
+        self.ppsn_delay_entry.grid(row=0, column=3, sticky="ew", pady=(0, 4))
+
+        self.ppsn_search_button = ttk.Button(
+            frame,
+            text="검색",
+            command=self._on_ppsn_search,
+        )
+        self.ppsn_search_button.grid(row=0, column=4, padx=(12, 0), pady=(0, 4))
+
+        ttk.Label(frame, text="검색 로그").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.ppsn_log = tk.Text(frame, height=8, state=tk.DISABLED, wrap="word")
+        self.ppsn_log.grid(row=2, column=0, columnspan=5, sticky="ew", pady=(0, 4))
+        log_scroll = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self.ppsn_log.yview)
+        log_scroll.grid(row=2, column=5, sticky="ns", pady=(0, 4))
+        self.ppsn_log.configure(yscrollcommand=log_scroll.set)
+
+        ttk.Label(frame, text="결과 PPSN").grid(row=3, column=0, sticky="w", pady=(4, 0))
+        self.ppsn_result_entry = ttk.Entry(
+            frame,
+            textvariable=self.ppsn_result_var,
+            state="readonly",
+        )
+        self.ppsn_result_entry.grid(row=3, column=1, columnspan=3, sticky="ew", pady=(4, 0))
+        self.ppsn_copy_button = ttk.Button(
+            frame,
+            text="복사",
+            command=self._copy_ppsn_result,
+            state=tk.DISABLED,
+        )
+        self.ppsn_copy_button.grid(row=3, column=4, padx=(12, 0), pady=(4, 0))
+
+        window.protocol("WM_DELETE_WINDOW", self._close_ppsn_window)
+        self.ppsn_window = window
+        self.ppsn_code_entry.focus_set()
+
+    def _close_ppsn_window(self) -> None:
+        if not self.ppsn_window or not self.ppsn_window.winfo_exists():
+            self.ppsn_window = None
+            return
+        self.ppsn_window.destroy()
+        self.ppsn_window = None
+        self.ppsn_code_entry = None
+        self.ppsn_delay_entry = None
+        self.ppsn_search_button = None
+        self.ppsn_log = None
+        self.ppsn_result_entry = None
+        self.ppsn_copy_button = None
 
     def _on_ppsn_search(self) -> None:
         if self.ppsn_running:
@@ -566,8 +668,10 @@ class PacketCaptureApp:
             return
 
         self.ppsn_running = True
-        self.ppsn_search_button.config(state=tk.DISABLED)
-        self.ppsn_copy_button.config(state=tk.DISABLED)
+        if self.ppsn_search_button and self.ppsn_search_button.winfo_exists():
+            self.ppsn_search_button.config(state=tk.DISABLED)
+        if self.ppsn_copy_button and self.ppsn_copy_button.winfo_exists():
+            self.ppsn_copy_button.config(state=tk.DISABLED)
         self.ppsn_result_var.set("")
         self._clear_ppsn_log()
         self._append_ppsn_log("[정보] PPSN 검색을 시작합니다.")
@@ -643,12 +747,16 @@ class PacketCaptureApp:
             self.ppsn_queue.put({"type": "finished"})
 
     def _clear_ppsn_log(self) -> None:
+        if not self.ppsn_log or not self.ppsn_log.winfo_exists():
+            return
         self.ppsn_log.config(state=tk.NORMAL)
         self.ppsn_log.delete("1.0", tk.END)
         self.ppsn_log.config(state=tk.DISABLED)
 
     def _append_ppsn_log(self, message: str) -> None:
         if not message:
+            return
+        if not self.ppsn_log or not self.ppsn_log.winfo_exists():
             return
         self.ppsn_log.config(state=tk.NORMAL)
         self.ppsn_log.insert(tk.END, message + "\n")
@@ -754,17 +862,18 @@ class PacketCaptureApp:
                 item.identifier = self.packet_counter
                 if not item.preview:
                     item.preview = self._extract_hangul_preview(item.utf8_text)
-                self.packet_list_data.append(item)
+                self._process_world_matching(item)
+                self.packet_list_data.insert(0, item)
                 if max_packets and max_packets > 0:
                     while len(self.packet_list_data) > max_packets:
-                        removed = self.packet_list_data.pop(0)
+                        removed = self.packet_list_data.pop()
                         if self.packet_tree.exists(str(removed.identifier)):
                             self.packet_tree.delete(str(removed.identifier))
                 updated = True
 
         if max_packets and max_packets > 0 and len(self.packet_list_data) > max_packets:
             while len(self.packet_list_data) > max_packets:
-                removed = self.packet_list_data.pop(0)
+                removed = self.packet_list_data.pop()
                 if self.packet_tree.exists(str(removed.identifier)):
                     self.packet_tree.delete(str(removed.identifier))
             updated = True
@@ -792,17 +901,20 @@ class PacketCaptureApp:
                 ppsn_value = item.get("ppsn")
                 if success and isinstance(ppsn_value, str) and ppsn_value:
                     self.ppsn_result_var.set(ppsn_value)
-                    self.ppsn_copy_button.config(state=tk.NORMAL)
+                    if self.ppsn_copy_button and self.ppsn_copy_button.winfo_exists():
+                        self.ppsn_copy_button.config(state=tk.NORMAL)
                 else:
                     if isinstance(ppsn_value, str):
                         self.ppsn_result_var.set(ppsn_value)
-                    self.ppsn_copy_button.config(state=tk.DISABLED)
+                    if self.ppsn_copy_button and self.ppsn_copy_button.winfo_exists():
+                        self.ppsn_copy_button.config(state=tk.DISABLED)
             elif message_type == "finished":
                 has_done_message = True
 
         if has_done_message:
             self.ppsn_running = False
-            self.ppsn_search_button.config(state=tk.NORMAL)
+            if self.ppsn_search_button and self.ppsn_search_button.winfo_exists():
+                self.ppsn_search_button.config(state=tk.NORMAL)
             self.ppsn_thread = None
 
         self.master.after(200, self._poll_ppsn_queue)
@@ -885,8 +997,12 @@ class PacketCaptureApp:
     def _on_text_filter_change(self, *_: object) -> None:
         self._refresh_packet_list()
 
+    def _on_direction_filter_change(self, *_: object) -> None:
+        self._refresh_packet_list()
+
     def _refresh_packet_list(self) -> None:
         filter_text = self.text_filter_var.get().strip().lower()
+        direction_filter = self.direction_filter_var.get().strip()
         previous_selection = self.packet_tree.selection()
         selected_id = previous_selection[0] if previous_selection else None
 
@@ -895,20 +1011,28 @@ class PacketCaptureApp:
 
         visible_ids: list[str] = []
         for item in self.packet_list_data:
-            if self._matches_text_filter(item, filter_text):
-                if not item.preview:
-                    item.preview = self._extract_hangul_preview(item.utf8_text)
-                iid = str(item.identifier)
-                self.packet_tree.insert("", tk.END, iid=iid, values=(item.summary, item.preview))
-                visible_ids.append(iid)
+            if not self._matches_text_filter(item, filter_text):
+                continue
+            if not self._matches_direction_filter(item, direction_filter):
+                continue
+            if not item.preview:
+                item.preview = self._extract_hangul_preview(item.utf8_text)
+            iid = str(item.identifier)
+            values = (
+                item.summary,
+                self._format_direction_text(item.direction),
+                item.preview,
+            )
+            self.packet_tree.insert("", tk.END, iid=iid, values=values)
+            visible_ids.append(iid)
 
         if selected_id and selected_id in visible_ids:
             self.packet_tree.selection_set(selected_id)
             self.packet_tree.see(selected_id)
         elif visible_ids:
-            last_id = visible_ids[-1]
-            self.packet_tree.selection_set(last_id)
-            self.packet_tree.see(last_id)
+            first_id = visible_ids[0]
+            self.packet_tree.selection_set(first_id)
+            self.packet_tree.see(first_id)
         else:
             current_selection = self.packet_tree.selection()
             if current_selection:
@@ -924,6 +1048,26 @@ class PacketCaptureApp:
             return False
         return filter_text in item.utf8_text.lower()
 
+    @staticmethod
+    def _format_direction_text(direction: str) -> str:
+        if direction == "incoming":
+            return "수신"
+        if direction == "outgoing":
+            return "송신"
+        return "미확인"
+
+    @staticmethod
+    def _matches_direction_filter(item: PacketDisplay, filter_value: str) -> bool:
+        if filter_value == "전체" or not filter_value:
+            return True
+        if filter_value == "수신":
+            return item.direction == "incoming"
+        if filter_value == "송신":
+            return item.direction == "outgoing"
+        if filter_value == "미확인":
+            return item.direction not in {"incoming", "outgoing"}
+        return True
+
     def _clear_capture_results(self) -> None:
         self.packet_list_data.clear()
         for child in self.packet_tree.get_children():
@@ -934,6 +1078,15 @@ class PacketCaptureApp:
     def _set_running_state(self, running: bool) -> None:
         self.start_button.config(state=tk.DISABLED if running else tk.NORMAL)
         self.stop_button.config(state=tk.NORMAL if running else tk.DISABLED)
+
+    def _toggle_world_panel(self) -> None:
+        if self.world_panel.winfo_ismapped():
+            self.world_panel.grid_remove()
+            self.world_toggle_button.config(text="월드 매칭")
+        else:
+            self.world_panel.grid()
+            self.world_toggle_button.config(text="월드 매칭 닫기")
+            self._refresh_world_table()
 
     def _on_close(self) -> None:
         self.stop_capture()
@@ -980,6 +1133,134 @@ class PacketCaptureApp:
                 if len(preview_chars) >= limit:
                     break
         return "".join(preview_chars)
+
+    @staticmethod
+    def _normalize_ip(address: str) -> str:
+        return address.split("%", 1)[0] if "%" in address else address
+
+    def _detect_local_addresses(self) -> set[str]:
+        addresses: set[str] = set()
+        host_candidates: set[str] = set()
+        try:
+            hostname = socket.gethostname()
+            if hostname:
+                host_candidates.add(hostname)
+        except OSError:
+            pass
+        try:
+            fqdn = socket.getfqdn()
+            if fqdn:
+                host_candidates.add(fqdn)
+        except OSError:
+            pass
+
+        for host in host_candidates:
+            try:
+                infos = socket.getaddrinfo(host, None)
+            except socket.gaierror:
+                continue
+            for info in infos:
+                sockaddr = info[4]
+                if not sockaddr:
+                    continue
+                address = sockaddr[0]
+                normalized = self._normalize_ip(address)
+                if normalized:
+                    addresses.add(normalized)
+
+        addresses.update({"127.0.0.1", "::1"})
+
+        probe_targets = [
+            (socket.AF_INET, ("8.8.8.8", 80)),
+            (socket.AF_INET6, ("2001:4860:4860::8888", 80)),
+        ]
+        for family, target in probe_targets:
+            try:
+                with socket.socket(family, socket.SOCK_DGRAM) as sock:
+                    sock.settimeout(0.2)
+                    sock.connect(target)
+                    addr = sock.getsockname()[0]
+            except OSError:
+                continue
+            else:
+                normalized = self._normalize_ip(addr)
+                if normalized:
+                    addresses.add(normalized)
+
+        return addresses
+
+    def _determine_direction(self, packet) -> str:
+        ip_src: Optional[str] = None
+        ip_dst: Optional[str] = None
+        if IP in packet:
+            ip_layer = packet[IP]
+            ip_src = getattr(ip_layer, "src", None)
+            ip_dst = getattr(ip_layer, "dst", None)
+        elif IPv6 in packet:
+            ip6_layer = packet[IPv6]
+            ip_src = getattr(ip6_layer, "src", None)
+            ip_dst = getattr(ip6_layer, "dst", None)
+
+        if not ip_src or not ip_dst:
+            return "unknown"
+
+        src = self._normalize_ip(str(ip_src))
+        dst = self._normalize_ip(str(ip_dst))
+        locals_set = self.local_addresses
+
+        if src in locals_set and dst not in locals_set:
+            return "outgoing"
+        if dst in locals_set and src not in locals_set:
+            return "incoming"
+        if src in locals_set and dst in locals_set:
+            return "internal"
+        return "unknown"
+
+    def _process_world_matching(self, item: PacketDisplay) -> None:
+        if not item.utf8_text:
+            return
+        matches = self._extract_world_matches(item.utf8_text)
+        if not matches:
+            return
+        added = False
+        for world_code, channel_name in matches:
+            added = self._add_world_match(world_code, channel_name) or added
+        if added:
+            self._refresh_world_table()
+
+    def _add_world_match(self, world_code: str, channel_name: str) -> bool:
+        key = (world_code, channel_name)
+        if key in self.world_match_keys:
+            return False
+        self.world_match_keys.add(key)
+        self.world_match_entries.insert(0, (channel_name, world_code))
+        return True
+
+    def _refresh_world_table(self) -> None:
+        if not hasattr(self, "world_tree") or self.world_tree is None:
+            return
+        for child in self.world_tree.get_children():
+            self.world_tree.delete(child)
+        for channel_name, world_code in self.world_match_entries:
+            self.world_tree.insert("", tk.END, values=(channel_name, world_code))
+
+    @staticmethod
+    def _extract_world_matches(text: str) -> list[tuple[str, str]]:
+        matches: list[tuple[str, str]] = []
+        search_pos = 0
+        while True:
+            channel_match = CHANNEL_NAME_PATTERN.search(text, search_pos)
+            if not channel_match:
+                break
+            channel_name = channel_match.group(1)
+            world_match = WORLD_ID_PATTERN.search(text, channel_match.end())
+            if world_match:
+                world_code = world_match.group(1)
+                matches.append((world_code, channel_name))
+                search_pos = world_match.end()
+            else:
+                search_pos = channel_match.end()
+        return matches
 
     def _save_settings(self) -> None:
         data = {

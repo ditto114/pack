@@ -16,6 +16,7 @@ import socket
 import threading
 import time
 import tkinter as tk
+from collections import deque
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
@@ -45,6 +46,19 @@ class PacketDisplay:
 
 
 NetworkType = Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
+
+
+@dataclass
+class FriendEntry:
+    code: str
+    ppsn: str
+    is_online: bool = False
+
+
+@dataclass
+class FriendPageData:
+    entries: list[FriendEntry]
+    first_friend_code: Optional[str]
 
 
 BASE_URL = "https://maplestoryworlds.nexon.com"
@@ -84,7 +98,10 @@ class FriendListParser(HTMLParser):
         super().__init__()
         self._within_friend_section = False
         self._current_ppsn: Optional[str] = None
-        self.entries: list[tuple[str, str]] = []
+        self._current_code: Optional[str] = None
+        self._current_is_online: Optional[bool] = None
+        self.entries: list[FriendEntry] = []
+        self.first_friend_code: Optional[str] = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
         attrs_dict = {key: value for key, value in attrs if value is not None}
@@ -97,23 +114,49 @@ class FriendListParser(HTMLParser):
         if not self._within_friend_section:
             return
 
+        if tag in {"li", "article"}:
+            # 항목별 기본 상태 초기화 및 온라인 여부 파악
+            if "isonline" in attrs_dict:
+                self._current_is_online = attrs_dict.get("isonline", "").strip() == "1"
+            else:
+                self._current_is_online = None
+            self._current_code = None
+        elif "isonline" in attrs_dict:
+            # 일부 구조에서 온라인 여부가 하위 요소에 위치할 수 있음
+            self._current_is_online = attrs_dict.get("isonline", "").strip() == "1"
+
         if "ppsn" in attrs_dict:
             self._current_ppsn = attrs_dict["ppsn"]
 
         if tag == "a" and "href" in attrs_dict:
             match = FRIEND_CODE_PATTERN.match(attrs_dict["href"])
-            if match:
+            if match and not self._current_code:
                 code = match.group(1)
                 ppsn = attrs_dict.get("ppsn", self._current_ppsn)
                 if ppsn:
-                    self.entries.append((code, ppsn))
+                    is_online = self._current_is_online
+                    if is_online is None:
+                        is_online = attrs_dict.get("isonline", "").strip() == "1"
+                    entry = FriendEntry(code=code, ppsn=ppsn, is_online=bool(is_online))
+                    self.entries.append(entry)
+                    self._current_code = code
+                    if self.first_friend_code is None:
+                        self.first_friend_code = code
 
     def handle_endtag(self, tag: str) -> None:
         if tag == "section" and self._within_friend_section:
             self._within_friend_section = False
             self._current_ppsn = None
+            self._current_code = None
+            self._current_is_online = None
         elif tag == "li":
             self._current_ppsn = None
+            self._current_code = None
+            self._current_is_online = None
+        elif tag == "article":
+            self._current_ppsn = None
+            self._current_code = None
+            self._current_is_online = None
 
 
 class ChannelSearchParser(HTMLParser):
@@ -237,13 +280,13 @@ def fetch_html(
 def extract_friend_codes_from_profile(html: str) -> list[str]:
     parser = FriendListParser()
     parser.feed(html)
-    return [code for code, _ in parser.entries]
+    return [entry.code for entry in parser.entries]
 
 
-def extract_entries_from_friends_page(html: str) -> list[tuple[str, str]]:
+def extract_entries_from_friends_page(html: str) -> FriendPageData:
     parser = FriendListParser()
     parser.feed(html)
-    return parser.entries
+    return FriendPageData(entries=list(parser.entries), first_friend_code=parser.first_friend_code)
 
 
 def get_initial_friends(target_code: str) -> list[str]:
@@ -259,7 +302,7 @@ def get_initial_friends(target_code: str) -> list[str]:
 
 def iter_friend_pages(
     friend_code: str, *, delay: float = 0.5
-) -> Iterable[tuple[str, list[tuple[str, str]]]]:
+) -> Iterable[tuple[str, FriendPageData]]:
     page = 1
     seen_empty = 0
     while True:
@@ -270,14 +313,14 @@ def iter_friend_pages(
             if exc.code == 404:
                 break
             raise
-        entries = extract_entries_from_friends_page(html)
-        if not entries:
+        page_data = extract_entries_from_friends_page(html)
+        if not page_data.entries:
             seen_empty += 1
             if seen_empty >= 2:
                 break
         else:
             seen_empty = 0
-            yield html, entries
+            yield html, page_data
         page += 1
         if delay:
             time.sleep(delay)
@@ -300,13 +343,13 @@ def find_ppsn(
     for friend_code in friends:
         log(f"[정보] 친구 {friend_code} 의 목록을 탐색합니다...")
         try:
-            for _html, entries in iter_friend_pages(friend_code, delay=delay):
-                for code, ppsn in entries:
-                    if code.upper() == target_code_upper:
+            for _html, page_data in iter_friend_pages(friend_code, delay=delay):
+                for entry in page_data.entries:
+                    if entry.code.upper() == target_code_upper:
                         log(
                             f"[결과] 친구 {friend_code} 의 목록에서 대상 코드를 찾았습니다."
                         )
-                        return ppsn, friend_code
+                        return entry.ppsn, friend_code
         except URLError as exc:
             log(f"[경고] {friend_code} 의 친구 목록을 불러오지 못했습니다: {exc}")
         except HTTPError as exc:
@@ -388,40 +431,98 @@ def find_friend_by_world_code(
     *,
     delay: float = 0.5,
     logger: Optional[Callable[[str], None]] = None,
+    progress_callback: Optional[Callable[[int], None]] = None,
 ) -> Optional[tuple[str, str, str]]:
     """지정한 친구 코드의 친구 목록에서 월드 코드를 탐색한다."""
 
     log = logger or (lambda message: None)
 
-    for page in range(1, 11):
-        url = FRIENDS_PAGE_URL.format(code=target_code, page=page)
-        referer = PROFILE_URL.format(code=target_code)
-        log(f"[정보] {page} 페이지에서 월드 코드 검색을 시도합니다...")
-        try:
-            html = fetch_html(url, referer=referer)
-        except HTTPError as exc:
-            if exc.code == 404:
-                log("[경고] 친구 목록 페이지를 찾을 수 없습니다. 입력한 친구 코드를 확인하세요.")
-                break
-            raise
+    processed_online_total = 0
+    if progress_callback:
+        progress_callback(processed_online_total)
 
-        if world_code not in html:
-            log("[정보] 해당 페이지에서 월드 코드를 찾지 못했습니다.")
-        else:
-            parser = ChannelSearchParser(world_code)
-            parser.feed(html)
-            if parser.found and parser.friend_name and parser.friend_code:
+    queue: deque[str] = deque([target_code])
+    queued: set[str] = {target_code.upper()}
+    visited: set[str] = set()
+
+    while queue:
+        current_code = queue.popleft()
+        normalized_code = current_code.upper()
+        if normalized_code in visited:
+            continue
+        visited.add(normalized_code)
+        log(f"[정보] 친구 {current_code} 의 친구 목록에서 월드 코드를 탐색합니다.")
+
+        fallback_friend_code: Optional[str] = None
+        enqueue_fallback = False
+
+        for page in range(1, 11):
+            url = FRIENDS_PAGE_URL.format(code=current_code, page=page)
+            referer = PROFILE_URL.format(code=current_code)
+            log(f"[정보] {current_code} 의 {page} 페이지에서 월드 코드 검색을 시도합니다...")
+            try:
+                html = fetch_html(url, referer=referer)
+            except HTTPError as exc:
+                if exc.code == 404:
+                    log("[경고] 친구 목록 페이지를 찾을 수 없습니다. 입력한 친구 코드를 확인하세요.")
+                    enqueue_fallback = True
+                    break
+                raise
+
+            page_data = extract_entries_from_friends_page(html)
+            if fallback_friend_code is None and page_data.first_friend_code:
+                fallback_friend_code = page_data.first_friend_code
                 log(
-                    "[결과] 월드 코드와 일치하는 친구 정보를 찾았습니다."
+                    f"[정보] 첫 번째 친구 코드 {fallback_friend_code} 를 다음 탐색 후보로 기록합니다."
                 )
-                friend_name = parser.friend_name
-                friend_code = parser.friend_code
-                ppsn = parser.ppsn or ""
-                return friend_name, friend_code, ppsn
-            log("[경고] 월드 코드를 포함한 블럭에서 필요한 정보를 추출하지 못했습니다.")
 
-        if delay:
-            time.sleep(delay)
+            online_entries = [entry for entry in page_data.entries if entry.is_online]
+            if not online_entries:
+                log("[정보] 온라인 상태의 친구가 없어 이 친구의 탐색을 중단합니다.")
+                enqueue_fallback = True
+                break
+
+            processed_online_total += len(online_entries)
+            if progress_callback:
+                progress_callback(processed_online_total)
+            log(
+                f"[정보] 현재 페이지에서 온라인 친구 {len(online_entries)}명을 확인했습니다."
+            )
+
+            if world_code in html:
+                parser = ChannelSearchParser(world_code)
+                parser.feed(html)
+                if parser.found and parser.friend_name and parser.friend_code:
+                    log(
+                        "[결과] 월드 코드와 일치하는 친구 정보를 찾았습니다."
+                    )
+                    friend_name = parser.friend_name
+                    friend_code = parser.friend_code
+                    ppsn = parser.ppsn or ""
+                    return friend_name, friend_code, ppsn
+                log("[경고] 월드 코드를 포함한 블럭에서 필요한 정보를 추출하지 못했습니다.")
+            else:
+                log("[정보] 해당 페이지에서 월드 코드를 찾지 못했습니다.")
+
+            if delay:
+                time.sleep(delay)
+        else:
+            enqueue_fallback = True
+
+        if enqueue_fallback and fallback_friend_code:
+            fallback_upper = fallback_friend_code.upper()
+            if fallback_upper not in visited and fallback_upper not in queued:
+                log(
+                    f"[정보] 친구 {fallback_friend_code} 의 친구 목록으로 탐색을 이어갑니다."
+                )
+                queue.append(fallback_friend_code)
+                queued.add(fallback_upper)
+            else:
+                log(
+                    f"[정보] 친구 {fallback_friend_code} 는 이미 탐색 대상에 포함되어 있습니다."
+                )
+        elif enqueue_fallback and not fallback_friend_code:
+            log("[경고] 이어서 탐색할 친구 코드를 찾지 못했습니다.")
 
     return None
 
@@ -469,6 +570,7 @@ class PacketCaptureApp:
         self.ppsn_result_entry: Optional[ttk.Entry] = None
         self.ppsn_copy_button: Optional[ttk.Button] = None
         self.channel_result_entry: Optional[ttk.Entry] = None
+        self.channel_count_entry: Optional[ttk.Entry] = None
 
         self._build_widgets()
         self._load_settings()
@@ -640,6 +742,7 @@ class PacketCaptureApp:
         self.ppsn_result_var = tk.StringVar()
         self.channel_world_var = tk.StringVar()
         self.channel_result_var = tk.StringVar()
+        self.channel_friend_count_var = tk.StringVar(value="0")
 
         self.world_panel = ttk.LabelFrame(main_frame, text="월드 매칭", padding=8)
         self.world_panel.grid(row=0, column=3, rowspan=4, sticky="nsew", padx=(12, 0))
@@ -861,6 +964,19 @@ class PacketCaptureApp:
         )
         self.channel_result_entry.grid(row=5, column=1, columnspan=4, sticky="ew", pady=(4, 0))
 
+        ttk.Label(frame, text="탐색한 온라인 친구 수").grid(
+            row=6, column=0, sticky="w", pady=(4, 0)
+        )
+        self.channel_count_entry = ttk.Entry(
+            frame,
+            textvariable=self.channel_friend_count_var,
+            state="readonly",
+            width=12,
+        )
+        self.channel_count_entry.grid(
+            row=6, column=1, sticky="w", pady=(4, 0), padx=(0, 8)
+        )
+
         window.protocol("WM_DELETE_WINDOW", self._close_ppsn_window)
         self.ppsn_window = window
         self.ppsn_code_entry.focus_set()
@@ -880,6 +996,8 @@ class PacketCaptureApp:
         self.ppsn_result_entry = None
         self.ppsn_copy_button = None
         self.channel_result_entry = None
+        self.channel_count_entry = None
+        self.channel_friend_count_var.set("0")
 
     def _on_ppsn_search(self) -> None:
         if self.lookup_running:
@@ -913,6 +1031,7 @@ class PacketCaptureApp:
         if self.ppsn_copy_button and self.ppsn_copy_button.winfo_exists():
             self.ppsn_copy_button.config(state=tk.DISABLED)
         self.ppsn_result_var.set("")
+        self.channel_friend_count_var.set("0")
         self._clear_ppsn_log()
         self._append_ppsn_log("[정보] PPSN 검색을 시작합니다.")
 
@@ -957,6 +1076,7 @@ class PacketCaptureApp:
                 self.ppsn_delay_entry.focus_set()
             return
 
+        self.channel_friend_count_var.set("0")
         self.lookup_running = True
         if self.ppsn_search_button and self.ppsn_search_button.winfo_exists():
             self.ppsn_search_button.config(state=tk.DISABLED)
@@ -1049,8 +1169,17 @@ class PacketCaptureApp:
         def log(message: str) -> None:
             self.ppsn_queue.put({"type": "log", "task": "channel", "text": message})
 
+        def progress(count: int) -> None:
+            self.ppsn_queue.put({"type": "progress", "task": "channel", "count": count})
+
         try:
-            result = find_friend_by_world_code(code, world_code, delay=delay, logger=log)
+            result = find_friend_by_world_code(
+                code,
+                world_code,
+                delay=delay,
+                logger=log,
+                progress_callback=progress,
+            )
         except HTTPError as exc:
             self.ppsn_queue.put(
                 {
@@ -1298,6 +1427,10 @@ class PacketCaptureApp:
                                 self.ppsn_copy_button.config(state=tk.NORMAL)
                             else:
                                 self.ppsn_copy_button.config(state=tk.DISABLED)
+            elif message_type == "progress" and task == "channel":
+                count = item.get("count")
+                if isinstance(count, int):
+                    self.channel_friend_count_var.set(str(count))
             elif message_type == "finished":
                 finished_tasks.add(task)
 

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import html as html_lib
 import ipaddress
 import json
 import queue
@@ -64,6 +65,7 @@ DEFAULT_REQUEST_HEADERS = {
     "Connection": "keep-alive",
 }
 FRIEND_CODE_PATTERN = re.compile(r"^/profile/([A-Za-z0-9]{5})$")
+FRIEND_CODE_IN_TEXT_PATTERN = re.compile(r"/profile/([A-Za-z0-9]{5})")
 VALUE_PREFIX_PATTERN = r"[\s:=\"'\x00-\x1F]*"
 WORLD_ID_PATTERN = re.compile(
     rf"w\s*o\s*r\s*l\s*d\s*i\s*d{VALUE_PREFIX_PATTERN}(\d{{17}})",
@@ -112,6 +114,79 @@ class FriendListParser(HTMLParser):
             self._current_ppsn = None
         elif tag == "li":
             self._current_ppsn = None
+
+
+class ChannelSearchParser(HTMLParser):
+    """친구 목록 카드에서 월드 코드와 일치하는 정보를 추출하는 파서."""
+
+    def __init__(self, target_world_code: str) -> None:
+        super().__init__()
+        self.target_world_code = target_world_code
+        self._in_target_block = False
+        self._block_depth = 0
+        self._capturing_name = False
+        self._name_buffer: list[str] = []
+        self.friend_name: Optional[str] = None
+        self.friend_code: Optional[str] = None
+        self.ppsn: Optional[str] = None
+        self._current_name: Optional[str] = None
+        self._current_code: Optional[str] = None
+        self._current_ppsn: Optional[str] = None
+        self.found = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
+        if self.found:
+            return
+
+        attrs_dict = {key: value for key, value in attrs if value is not None}
+
+        if not self._in_target_block and attrs_dict.get("gameinstanceid") == self.target_world_code:
+            self._in_target_block = True
+            self._block_depth = 1
+            self._current_ppsn = attrs_dict.get("ppsn")
+            self._current_name = None
+            self._current_code = None
+            return
+
+        if self._in_target_block:
+            self._block_depth += 1
+            if tag == "a" and "href" in attrs_dict and not self._current_code:
+                match = FRIEND_CODE_PATTERN.match(attrs_dict["href"])
+                if match:
+                    self._current_code = match.group(1)
+            if tag == "p":
+                class_name = attrs_dict.get("class", "")
+                if "txt_name" in class_name:
+                    self._capturing_name = True
+                    self._name_buffer.clear()
+
+    def handle_endtag(self, tag: str) -> None:
+        if self.found:
+            return
+
+        if self._capturing_name and tag == "p":
+            self._capturing_name = False
+            name = html_lib.unescape("".join(self._name_buffer)).strip()
+            if name:
+                self._current_name = name
+
+        if self._in_target_block:
+            self._block_depth -= 1
+            if self._block_depth == 0:
+                self._in_target_block = False
+                if self._current_name and self._current_code:
+                    self.friend_name = self._current_name
+                    self.friend_code = self._current_code
+                    self.ppsn = self._current_ppsn
+                    self.found = True
+                else:
+                    self._current_ppsn = None
+                    self._current_name = None
+                    self._current_code = None
+
+    def handle_data(self, data: str) -> None:
+        if self._capturing_name:
+            self._name_buffer.append(data)
 
 
 def fetch_html(
@@ -182,7 +257,9 @@ def get_initial_friends(target_code: str) -> list[str]:
     return codes
 
 
-def iter_friend_pages(friend_code: str, *, delay: float = 0.5) -> Iterable[list[tuple[str, str]]]:
+def iter_friend_pages(
+    friend_code: str, *, delay: float = 0.5
+) -> Iterable[tuple[str, list[tuple[str, str]]]]:
     page = 1
     seen_empty = 0
     while True:
@@ -200,7 +277,7 @@ def iter_friend_pages(friend_code: str, *, delay: float = 0.5) -> Iterable[list[
                 break
         else:
             seen_empty = 0
-            yield entries
+            yield html, entries
         page += 1
         if delay:
             time.sleep(delay)
@@ -223,7 +300,7 @@ def find_ppsn(
     for friend_code in friends:
         log(f"[정보] 친구 {friend_code} 의 목록을 탐색합니다...")
         try:
-            for entries in iter_friend_pages(friend_code, delay=delay):
+            for _html, entries in iter_friend_pages(friend_code, delay=delay):
                 for code, ppsn in entries:
                     if code.upper() == target_code_upper:
                         log(
@@ -234,6 +311,117 @@ def find_ppsn(
             log(f"[경고] {friend_code} 의 친구 목록을 불러오지 못했습니다: {exc}")
         except HTTPError as exc:
             log(f"[경고] {friend_code} 의 친구 목록 요청 실패({exc.code}): {exc.reason}")
+
+    return None
+
+
+def _strip_html_tags(text: str) -> str:
+    return re.sub(r"<[^>]+>", "", text)
+
+
+def extract_world_matches_from_html(html_text: str, world_code: str) -> list[tuple[str, str]]:
+    if not world_code:
+        return []
+    lower_text = html_text.lower()
+    target = world_code.lower()
+    results: list[tuple[str, str]] = []
+    search_pos = 0
+
+    while True:
+        index = lower_text.find(target, search_pos)
+        if index == -1:
+            break
+
+        before_index = lower_text.rfind("gameinstanceid", 0, index)
+        if before_index == -1:
+            search_pos = index + len(target)
+            continue
+
+        start_candidates = [
+            html_text.rfind(tag, 0, index) for tag in ("<li", "<article", "<div")
+        ]
+        block_start = max(start_candidates)
+        if block_start == -1:
+            block_start = max(0, index - 400)
+
+        end_candidates = []
+        for tag in ("</li", "</article", "</div"):
+            pos = html_text.find(tag, index)
+            if pos != -1:
+                close_pos = html_text.find(">", pos)
+                if close_pos != -1:
+                    end_candidates.append(close_pos + 1)
+        if end_candidates:
+            block_end = min(end_candidates)
+        else:
+            block_end = min(len(html_text), index + 400)
+
+        block = html_text[block_start:block_end]
+        game_match = re.search(
+            rf"gameinstanceid{VALUE_PREFIX_PATTERN}(\d{{17}})", block, re.IGNORECASE
+        )
+        if not game_match or game_match.group(1) != world_code:
+            search_pos = index + len(target)
+            continue
+
+        name_match = re.search(
+            r"<p[^>]*class=\"[^\"]*txt_name[^\"]*\"[^>]*>(.*?)</p>",
+            block,
+            re.IGNORECASE | re.DOTALL,
+        )
+        friend_match = FRIEND_CODE_IN_TEXT_PATTERN.search(block)
+
+        if name_match and friend_match:
+            name_text = html_lib.unescape(_strip_html_tags(name_match.group(1))).strip()
+            friend_code = friend_match.group(1)
+            if name_text and friend_code:
+                results.append((name_text, friend_code))
+
+        search_pos = index + len(target)
+
+    return results
+
+
+def find_friend_by_world_code(
+    target_code: str,
+    world_code: str,
+    *,
+    delay: float = 0.5,
+    logger: Optional[Callable[[str], None]] = None,
+) -> Optional[tuple[str, str, str]]:
+    """지정한 친구 코드의 친구 목록에서 월드 코드를 탐색한다."""
+
+    log = logger or (lambda message: None)
+
+    for page in range(1, 11):
+        url = FRIENDS_PAGE_URL.format(code=target_code, page=page)
+        referer = PROFILE_URL.format(code=target_code)
+        log(f"[정보] {page} 페이지에서 월드 코드 검색을 시도합니다...")
+        try:
+            html = fetch_html(url, referer=referer)
+        except HTTPError as exc:
+            if exc.code == 404:
+                log("[경고] 친구 목록 페이지를 찾을 수 없습니다. 입력한 친구 코드를 확인하세요.")
+                break
+            raise
+
+        if world_code not in html:
+            log("[정보] 해당 페이지에서 월드 코드를 찾지 못했습니다.")
+        else:
+            parser = ChannelSearchParser(world_code)
+            parser.feed(html)
+            if parser.found and parser.friend_name and parser.friend_code:
+                log(
+                    "[결과] 월드 코드와 일치하는 친구 정보를 찾았습니다."
+                )
+                friend_name = parser.friend_name
+                friend_code = parser.friend_code
+                ppsn = parser.ppsn or ""
+                return friend_name, friend_code, ppsn
+            log("[경고] 월드 코드를 포함한 블럭에서 필요한 정보를 추출하지 못했습니다.")
+
+        if delay:
+            time.sleep(delay)
 
     return None
 
@@ -264,18 +452,23 @@ class PacketCaptureApp:
         self.settings_path = Path(__file__).resolve().with_name("packet_capture_settings.json")
         self.ppsn_queue: "queue.Queue[dict[str, object]]" = queue.Queue()
         self.ppsn_thread: Optional[threading.Thread] = None
-        self.ppsn_running = False
+        self.lookup_running = False
         self.local_addresses = self._detect_local_addresses()
         self.direction_filter_var = tk.StringVar(value="전체")
         self.world_match_entries: list[tuple[str, str]] = []
         self.world_match_keys: set[tuple[str, str]] = set()
+        self._world_match_buffer: str = ""
+        self._world_last_clicked_item: Optional[str] = None
         self.ppsn_window: Optional[tk.Toplevel] = None
         self.ppsn_code_entry: Optional[ttk.Entry] = None
         self.ppsn_delay_entry: Optional[ttk.Entry] = None
         self.ppsn_search_button: Optional[ttk.Button] = None
+        self.channel_world_entry: Optional[ttk.Entry] = None
+        self.channel_search_button: Optional[ttk.Button] = None
         self.ppsn_log: Optional[tk.Text] = None
         self.ppsn_result_entry: Optional[ttk.Entry] = None
         self.ppsn_copy_button: Optional[ttk.Button] = None
+        self.channel_result_entry: Optional[ttk.Entry] = None
 
         self._build_widgets()
         self._load_settings()
@@ -445,6 +638,8 @@ class PacketCaptureApp:
         self.ppsn_code_var = tk.StringVar()
         self.ppsn_delay_var = tk.StringVar(value="0.5")
         self.ppsn_result_var = tk.StringVar()
+        self.channel_world_var = tk.StringVar()
+        self.channel_result_var = tk.StringVar()
 
         self.world_panel = ttk.LabelFrame(main_frame, text="월드 매칭", padding=8)
         self.world_panel.grid(row=0, column=3, rowspan=4, sticky="nsew", padx=(12, 0))
@@ -467,6 +662,7 @@ class PacketCaptureApp:
         self.world_tree.column("channel", anchor="w", width=120, stretch=True)
         self.world_tree.column("world", anchor="w", width=180, stretch=True)
         self.world_tree.grid(row=1, column=0, sticky="nsew")
+        self.world_tree.bind("<ButtonRelease-1>", self._on_world_tree_click)
 
         world_scroll = ttk.Scrollbar(self.world_panel, orient=tk.VERTICAL, command=self.world_tree.yview)
         world_scroll.grid(row=1, column=1, sticky="ns")
@@ -599,6 +795,7 @@ class PacketCaptureApp:
         window.rowconfigure(0, weight=1)
         frame.columnconfigure(1, weight=1)
         frame.columnconfigure(3, weight=1)
+        frame.rowconfigure(3, weight=1)
 
         ttk.Label(frame, text="친구 코드 (5글자)").grid(
             row=0, column=0, sticky="w", padx=(0, 8), pady=(0, 4)
@@ -614,32 +811,55 @@ class PacketCaptureApp:
 
         self.ppsn_search_button = ttk.Button(
             frame,
-            text="검색",
+            text="PPSN 검색",
             command=self._on_ppsn_search,
         )
         self.ppsn_search_button.grid(row=0, column=4, padx=(12, 0), pady=(0, 4))
 
-        ttk.Label(frame, text="검색 로그").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(frame, text="월드 코드 (17자리)").grid(
+            row=1, column=0, sticky="w", padx=(0, 8), pady=(4, 0)
+        )
+        self.channel_world_entry = ttk.Entry(
+            frame, textvariable=self.channel_world_var, width=20
+        )
+        self.channel_world_entry.grid(row=1, column=1, columnspan=3, sticky="ew", pady=(4, 0))
+
+        self.channel_search_button = ttk.Button(
+            frame,
+            text="채널검색",
+            command=self._on_channel_search,
+        )
+        self.channel_search_button.grid(row=1, column=4, padx=(12, 0), pady=(4, 0))
+
+        ttk.Label(frame, text="검색 로그").grid(row=2, column=0, sticky="w", pady=(8, 0))
         self.ppsn_log = tk.Text(frame, height=8, state=tk.DISABLED, wrap="word")
-        self.ppsn_log.grid(row=2, column=0, columnspan=5, sticky="ew", pady=(0, 4))
+        self.ppsn_log.grid(row=3, column=0, columnspan=5, sticky="nsew", pady=(0, 4))
         log_scroll = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self.ppsn_log.yview)
-        log_scroll.grid(row=2, column=5, sticky="ns", pady=(0, 4))
+        log_scroll.grid(row=3, column=5, sticky="ns", pady=(0, 4))
         self.ppsn_log.configure(yscrollcommand=log_scroll.set)
 
-        ttk.Label(frame, text="결과 PPSN").grid(row=3, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(frame, text="결과 PPSN").grid(row=4, column=0, sticky="w", pady=(4, 0))
         self.ppsn_result_entry = ttk.Entry(
             frame,
             textvariable=self.ppsn_result_var,
             state="readonly",
         )
-        self.ppsn_result_entry.grid(row=3, column=1, columnspan=3, sticky="ew", pady=(4, 0))
+        self.ppsn_result_entry.grid(row=4, column=1, columnspan=3, sticky="ew", pady=(4, 0))
         self.ppsn_copy_button = ttk.Button(
             frame,
             text="복사",
             command=self._copy_ppsn_result,
             state=tk.DISABLED,
         )
-        self.ppsn_copy_button.grid(row=3, column=4, padx=(12, 0), pady=(4, 0))
+        self.ppsn_copy_button.grid(row=4, column=4, padx=(12, 0), pady=(4, 0))
+
+        ttk.Label(frame, text="채널 검색 결과").grid(row=5, column=0, sticky="w", pady=(4, 0))
+        self.channel_result_entry = ttk.Entry(
+            frame,
+            textvariable=self.channel_result_var,
+            state="readonly",
+        )
+        self.channel_result_entry.grid(row=5, column=1, columnspan=4, sticky="ew", pady=(4, 0))
 
         window.protocol("WM_DELETE_WINDOW", self._close_ppsn_window)
         self.ppsn_window = window
@@ -654,13 +874,16 @@ class PacketCaptureApp:
         self.ppsn_code_entry = None
         self.ppsn_delay_entry = None
         self.ppsn_search_button = None
+        self.channel_world_entry = None
+        self.channel_search_button = None
         self.ppsn_log = None
         self.ppsn_result_entry = None
         self.ppsn_copy_button = None
+        self.channel_result_entry = None
 
     def _on_ppsn_search(self) -> None:
-        if self.ppsn_running:
-            messagebox.showinfo("알림", "PPSN 검색이 진행 중입니다.")
+        if self.lookup_running:
+            messagebox.showinfo("알림", "다른 검색 작업이 진행 중입니다.")
             return
 
         code = self.ppsn_code_var.get().strip()
@@ -682,9 +905,11 @@ class PacketCaptureApp:
             self.ppsn_delay_entry.focus_set()
             return
 
-        self.ppsn_running = True
+        self.lookup_running = True
         if self.ppsn_search_button and self.ppsn_search_button.winfo_exists():
             self.ppsn_search_button.config(state=tk.DISABLED)
+        if self.channel_search_button and self.channel_search_button.winfo_exists():
+            self.channel_search_button.config(state=tk.DISABLED)
         if self.ppsn_copy_button and self.ppsn_copy_button.winfo_exists():
             self.ppsn_copy_button.config(state=tk.DISABLED)
         self.ppsn_result_var.set("")
@@ -698,9 +923,62 @@ class PacketCaptureApp:
         )
         self.ppsn_thread.start()
 
+    def _on_channel_search(self) -> None:
+        if self.lookup_running:
+            messagebox.showinfo("알림", "다른 검색 작업이 진행 중입니다.")
+            return
+
+        code = self.ppsn_code_var.get().strip()
+        if not re.fullmatch(r"[A-Za-z0-9]{5}", code):
+            messagebox.showerror("입력 오류", "친구 코드는 영문 대소문자/숫자의 5글자여야 합니다.")
+            if self.ppsn_code_entry:
+                self.ppsn_code_entry.focus_set()
+            return
+
+        world_code = self.channel_world_var.get().strip()
+        if not re.fullmatch(r"\d{17}", world_code):
+            messagebox.showerror("입력 오류", "월드 코드는 숫자 17자리여야 합니다.")
+            if self.channel_world_entry:
+                self.channel_world_entry.focus_set()
+            return
+
+        delay_text = self.ppsn_delay_var.get().strip() or "0.5"
+        try:
+            delay = float(delay_text)
+        except ValueError:
+            messagebox.showerror("입력 오류", "대기 시간은 숫자 형식이어야 합니다.")
+            if self.ppsn_delay_entry:
+                self.ppsn_delay_entry.focus_set()
+            return
+
+        if delay < 0:
+            messagebox.showerror("입력 오류", "대기 시간은 0 이상이어야 합니다.")
+            if self.ppsn_delay_entry:
+                self.ppsn_delay_entry.focus_set()
+            return
+
+        self.lookup_running = True
+        if self.ppsn_search_button and self.ppsn_search_button.winfo_exists():
+            self.ppsn_search_button.config(state=tk.DISABLED)
+        if self.channel_search_button and self.channel_search_button.winfo_exists():
+            self.channel_search_button.config(state=tk.DISABLED)
+        if self.ppsn_copy_button and self.ppsn_copy_button.winfo_exists():
+            self.ppsn_copy_button.config(state=tk.DISABLED)
+        self.ppsn_result_var.set("")
+        self.channel_result_var.set("")
+        self._clear_ppsn_log()
+        self._append_ppsn_log("[정보] 채널 검색을 시작합니다.")
+
+        self.ppsn_thread = threading.Thread(
+            target=self._run_channel_lookup,
+            args=(code, world_code, delay),
+            daemon=True,
+        )
+        self.ppsn_thread.start()
+
     def _run_ppsn_lookup(self, code: str, delay: float) -> None:
         def log(message: str) -> None:
-            self.ppsn_queue.put({"type": "log", "text": message})
+            self.ppsn_queue.put({"type": "log", "task": "ppsn", "text": message})
 
         try:
             result = find_ppsn(code, delay=delay, logger=log)
@@ -708,6 +986,7 @@ class PacketCaptureApp:
             self.ppsn_queue.put(
                 {
                     "type": "done",
+                    "task": "ppsn",
                     "success": False,
                     "text": f"[오류] 프로필 페이지 요청 실패({exc.code}): {exc.reason}",
                 }
@@ -716,6 +995,7 @@ class PacketCaptureApp:
             self.ppsn_queue.put(
                 {
                     "type": "done",
+                    "task": "ppsn",
                     "success": False,
                     "text": f"[오류] 네트워크 오류가 발생했습니다: {exc}",
                 }
@@ -724,6 +1004,7 @@ class PacketCaptureApp:
             self.ppsn_queue.put(
                 {
                     "type": "done",
+                    "task": "ppsn",
                     "success": False,
                     "text": f"[오류] {exc}",
                 }
@@ -732,6 +1013,7 @@ class PacketCaptureApp:
             self.ppsn_queue.put(
                 {
                     "type": "done",
+                    "task": "ppsn",
                     "success": False,
                     "text": f"[오류] 알 수 없는 오류가 발생했습니다: {exc}",
                 }
@@ -741,6 +1023,7 @@ class PacketCaptureApp:
                 self.ppsn_queue.put(
                     {
                         "type": "done",
+                        "task": "ppsn",
                         "success": False,
                         "text": "[결과] 친구 목록 어디에서도 해당 친구 코드를 찾지 못했습니다.",
                     }
@@ -750,6 +1033,7 @@ class PacketCaptureApp:
                 self.ppsn_queue.put(
                     {
                         "type": "done",
+                        "task": "ppsn",
                         "success": True,
                         "text": (
                             f"[결과] 친구 코드 {code.upper()} 의 PPSN은 {ppsn} 입니다. "
@@ -759,7 +1043,82 @@ class PacketCaptureApp:
                     }
                 )
         finally:
-            self.ppsn_queue.put({"type": "finished"})
+            self.ppsn_queue.put({"type": "finished", "task": "ppsn"})
+
+    def _run_channel_lookup(self, code: str, world_code: str, delay: float) -> None:
+        def log(message: str) -> None:
+            self.ppsn_queue.put({"type": "log", "task": "channel", "text": message})
+
+        try:
+            result = find_friend_by_world_code(code, world_code, delay=delay, logger=log)
+        except HTTPError as exc:
+            self.ppsn_queue.put(
+                {
+                    "type": "done",
+                    "task": "channel",
+                    "success": False,
+                    "text": f"[오류] 프로필 페이지 요청 실패({exc.code}): {exc.reason}",
+                    "channel_result": "",
+                }
+            )
+        except URLError as exc:
+            self.ppsn_queue.put(
+                {
+                    "type": "done",
+                    "task": "channel",
+                    "success": False,
+                    "text": f"[오류] 네트워크 오류가 발생했습니다: {exc}",
+                    "channel_result": "",
+                }
+            )
+        except RuntimeError as exc:
+            self.ppsn_queue.put(
+                {
+                    "type": "done",
+                    "task": "channel",
+                    "success": False,
+                    "text": f"[오류] {exc}",
+                    "channel_result": "",
+                }
+            )
+        except Exception as exc:  # pragma: no cover - 예기치 못한 예외 대비
+            self.ppsn_queue.put(
+                {
+                    "type": "done",
+                    "task": "channel",
+                    "success": False,
+                    "text": f"[오류] 알 수 없는 오류가 발생했습니다: {exc}",
+                    "channel_result": "",
+                }
+            )
+        else:
+            if result is None:
+                self.ppsn_queue.put(
+                    {
+                        "type": "done",
+                        "task": "channel",
+                        "success": False,
+                        "text": "[결과] 입력한 월드 코드와 일치하는 친구를 찾지 못했습니다.",
+                        "channel_result": "",
+                    }
+                )
+            else:
+                friend_name, friend_code, ppsn_value = result
+                self.ppsn_queue.put(
+                    {
+                        "type": "done",
+                        "task": "channel",
+                        "success": True,
+                        "text": (
+                            f"[결과] 월드 코드 {world_code} 은(는) {friend_name} ({friend_code}) 와 "
+                            "일치합니다."
+                        ),
+                        "channel_result": f"{friend_name} / {friend_code}",
+                        "ppsn": ppsn_value,
+                    }
+                )
+        finally:
+            self.ppsn_queue.put({"type": "finished", "task": "channel"})
 
     def _clear_ppsn_log(self) -> None:
         if not self.ppsn_log or not self.ppsn_log.winfo_exists():
@@ -901,13 +1260,14 @@ class PacketCaptureApp:
         self.master.after(200, self._poll_queue)
 
     def _poll_ppsn_queue(self) -> None:
-        has_done_message = False
+        finished_tasks: set[str] = set()
         while True:
             try:
                 item = self.ppsn_queue.get_nowait()
             except queue.Empty:
                 break
             message_type = item.get("type")
+            task = item.get("task", "ppsn")
             if message_type == "log":
                 self._append_ppsn_log(item.get("text", ""))
             elif message_type == "done":
@@ -915,23 +1275,38 @@ class PacketCaptureApp:
                 if text:
                     self._append_ppsn_log(text)
                 success = bool(item.get("success"))
-                ppsn_value = item.get("ppsn")
-                if success and isinstance(ppsn_value, str) and ppsn_value:
-                    self.ppsn_result_var.set(ppsn_value)
-                    if self.ppsn_copy_button and self.ppsn_copy_button.winfo_exists():
-                        self.ppsn_copy_button.config(state=tk.NORMAL)
-                else:
+                if task == "ppsn":
+                    ppsn_value = item.get("ppsn")
+                    if success and isinstance(ppsn_value, str) and ppsn_value:
+                        self.ppsn_result_var.set(ppsn_value)
+                        if self.ppsn_copy_button and self.ppsn_copy_button.winfo_exists():
+                            self.ppsn_copy_button.config(state=tk.NORMAL)
+                    else:
+                        if isinstance(ppsn_value, str):
+                            self.ppsn_result_var.set(ppsn_value)
+                        if self.ppsn_copy_button and self.ppsn_copy_button.winfo_exists():
+                            self.ppsn_copy_button.config(state=tk.DISABLED)
+                elif task == "channel":
+                    result_text = item.get("channel_result")
+                    if isinstance(result_text, str):
+                        self.channel_result_var.set(result_text)
+                    ppsn_value = item.get("ppsn")
                     if isinstance(ppsn_value, str):
                         self.ppsn_result_var.set(ppsn_value)
-                    if self.ppsn_copy_button and self.ppsn_copy_button.winfo_exists():
-                        self.ppsn_copy_button.config(state=tk.DISABLED)
+                        if self.ppsn_copy_button and self.ppsn_copy_button.winfo_exists():
+                            if success and ppsn_value:
+                                self.ppsn_copy_button.config(state=tk.NORMAL)
+                            else:
+                                self.ppsn_copy_button.config(state=tk.DISABLED)
             elif message_type == "finished":
-                has_done_message = True
+                finished_tasks.add(task)
 
-        if has_done_message:
-            self.ppsn_running = False
+        if finished_tasks:
+            self.lookup_running = False
             if self.ppsn_search_button and self.ppsn_search_button.winfo_exists():
                 self.ppsn_search_button.config(state=tk.NORMAL)
+            if self.channel_search_button and self.channel_search_button.winfo_exists():
+                self.channel_search_button.config(state=tk.NORMAL)
             self.ppsn_thread = None
 
         self.master.after(200, self._poll_ppsn_queue)
@@ -1133,6 +1508,11 @@ class PacketCaptureApp:
         for child in self.packet_tree.get_children():
             self.packet_tree.delete(child)
         self.packet_counter = 0
+        self.world_match_entries.clear()
+        self.world_match_keys.clear()
+        self._world_match_buffer = ""
+        self._world_last_clicked_item = None
+        self._refresh_world_table()
         self._set_detail_text("캡쳐를 시작하면 패킷이 여기에 표시됩니다.")
 
     def _set_running_state(self, running: bool) -> None:
@@ -1279,7 +1659,7 @@ class PacketCaptureApp:
     def _process_world_matching(self, item: PacketDisplay) -> None:
         if not item.utf8_text:
             return
-        matches = self._extract_world_matches(item.utf8_text)
+        matches = self._extract_world_matches_from_stream(item.utf8_text)
         if not matches:
             return
         added = False
@@ -1303,23 +1683,59 @@ class PacketCaptureApp:
             self.world_tree.delete(child)
         for channel_name, world_code in self.world_match_entries:
             self.world_tree.insert("", tk.END, values=(channel_name, world_code))
+        self._world_last_clicked_item = None
 
-    @staticmethod
-    def _extract_world_matches(text: str) -> list[tuple[str, str]]:
+    def _on_world_tree_click(self, event: tk.Event) -> None:
+        if not hasattr(self, "world_tree") or self.world_tree is None:
+            return
+        item_id = self.world_tree.identify_row(event.y)
+        if not item_id:
+            self._world_last_clicked_item = None
+            return
+        if self._world_last_clicked_item == item_id:
+            self._copy_world_code_to_clipboard(item_id)
+        self._world_last_clicked_item = item_id
+
+    def _copy_world_code_to_clipboard(self, item_id: str) -> None:
+        if not hasattr(self, "world_tree") or self.world_tree is None:
+            return
+        values = self.world_tree.item(item_id, "values")
+        if len(values) < 2:
+            return
+        world_code = values[1]
+        if not world_code:
+            return
+        try:
+            self.master.clipboard_clear()
+            self.master.clipboard_append(world_code)
+            self.master.update()
+        except tk.TclError:
+            pass
+
+    def _extract_world_matches_from_stream(self, text: Optional[str]) -> list[tuple[str, str]]:
+        if not text:
+            return []
+        self._world_match_buffer += text
+        if len(self._world_match_buffer) > 8192:
+            self._world_match_buffer = self._world_match_buffer[-8192:]
+
         matches: list[tuple[str, str]] = []
-        search_pos = 0
         while True:
-            channel_match = CHANNEL_NAME_PATTERN.search(text, search_pos)
+            channel_match = CHANNEL_NAME_PATTERN.search(self._world_match_buffer)
             if not channel_match:
                 break
-            channel_name = channel_match.group(1)
-            world_match = WORLD_ID_PATTERN.search(text, channel_match.end())
+            world_match = WORLD_ID_PATTERN.search(
+                self._world_match_buffer, channel_match.end()
+            )
             if world_match:
+                channel_name = channel_match.group(1)
                 world_code = world_match.group(1)
                 matches.append((world_code, channel_name))
-                search_pos = world_match.end()
+                self._world_match_buffer = self._world_match_buffer[world_match.end() :]
             else:
-                search_pos = channel_match.end()
+                self._world_match_buffer = self._world_match_buffer[channel_match.start() :]
+                break
+
         return matches
 
     def _save_settings(self) -> None:
@@ -1369,3 +1785,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

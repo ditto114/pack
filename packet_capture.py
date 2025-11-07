@@ -17,7 +17,7 @@ import threading
 import time
 import tkinter as tk
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
 from tkinter import messagebox, ttk
@@ -53,6 +53,9 @@ class FriendEntry:
     code: str
     ppsn: str
     is_online: bool = False
+    display_name: str = ""
+    world_name: str = ""
+    game_instance_id: str = ""
 
 
 @dataclass
@@ -100,6 +103,11 @@ class FriendListParser(HTMLParser):
         self._current_ppsn: Optional[str] = None
         self._current_code: Optional[str] = None
         self._current_is_online: Optional[bool] = None
+        self._current_world_name: Optional[str] = None
+        self._current_game_instance_id: Optional[str] = None
+        self._current_entry: Optional[FriendEntry] = None
+        self._capturing_name = False
+        self._name_buffer: list[str] = []
         self.entries: list[FriendEntry] = []
         self.first_friend_code: Optional[str] = None
 
@@ -115,18 +123,49 @@ class FriendListParser(HTMLParser):
             return
 
         if tag in {"li", "article"}:
-            # 항목별 기본 상태 초기화 및 온라인 여부 파악
             if "isonline" in attrs_dict:
                 self._current_is_online = attrs_dict.get("isonline", "").strip() == "1"
             else:
                 self._current_is_online = None
             self._current_code = None
-        elif "isonline" in attrs_dict:
-            # 일부 구조에서 온라인 여부가 하위 요소에 위치할 수 있음
+            self._current_entry = None
+            self._current_world_name = None
+            self._current_game_instance_id = None
+            self._capturing_name = False
+        elif tag == "div":
+            class_name = attrs_dict.get("class", "")
+            if "card_friend" in class_name or "card_user" in class_name:
+                self._current_code = None
+                self._current_entry = None
+                if "isonline" not in attrs_dict:
+                    self._current_is_online = None
+
+        if "isonline" in attrs_dict:
             self._current_is_online = attrs_dict.get("isonline", "").strip() == "1"
 
         if "ppsn" in attrs_dict:
-            self._current_ppsn = attrs_dict["ppsn"]
+            self._current_ppsn = attrs_dict["ppsn"].strip()
+            self._current_entry = None
+
+        if "worldname" in attrs_dict:
+            world_name = html_lib.unescape(attrs_dict["worldname"]).strip()
+            if world_name:
+                self._current_world_name = world_name
+                if self._current_entry and not self._current_entry.world_name:
+                    self._current_entry.world_name = world_name
+
+        if "gameinstanceid" in attrs_dict:
+            game_instance_id = attrs_dict["gameinstanceid"].strip()
+            if game_instance_id:
+                self._current_game_instance_id = game_instance_id
+                if self._current_entry and not self._current_entry.game_instance_id:
+                    self._current_entry.game_instance_id = game_instance_id
+
+        if tag == "p":
+            class_name = attrs_dict.get("class", "")
+            if "txt_name" in class_name:
+                self._capturing_name = True
+                self._name_buffer.clear()
 
         if tag == "a" and "href" in attrs_dict:
             match = FRIEND_CODE_PATTERN.match(attrs_dict["href"])
@@ -137,26 +176,63 @@ class FriendListParser(HTMLParser):
                     is_online = self._current_is_online
                     if is_online is None:
                         is_online = attrs_dict.get("isonline", "").strip() == "1"
-                    entry = FriendEntry(code=code, ppsn=ppsn, is_online=bool(is_online))
+                    entry = FriendEntry(
+                        code=code,
+                        ppsn=ppsn,
+                        is_online=bool(is_online),
+                        display_name="",
+                        world_name=self._current_world_name or "",
+                        game_instance_id=self._current_game_instance_id or "",
+                    )
                     self.entries.append(entry)
                     self._current_code = code
+                    self._current_entry = entry
                     if self.first_friend_code is None:
                         self.first_friend_code = code
 
     def handle_endtag(self, tag: str) -> None:
+        if self._capturing_name and tag == "p":
+            self._capturing_name = False
+            name = html_lib.unescape("".join(self._name_buffer)).strip()
+            self._name_buffer.clear()
+            if name and self._current_entry:
+                self._current_entry.display_name = name
+            return
+
         if tag == "section" and self._within_friend_section:
             self._within_friend_section = False
             self._current_ppsn = None
             self._current_code = None
             self._current_is_online = None
+            self._current_world_name = None
+            self._current_game_instance_id = None
+            self._current_entry = None
+            self._capturing_name = False
+            self._name_buffer.clear()
         elif tag == "li":
             self._current_ppsn = None
             self._current_code = None
             self._current_is_online = None
+            self._current_world_name = None
+            self._current_game_instance_id = None
+            self._current_entry = None
+            self._capturing_name = False
+            self._name_buffer.clear()
         elif tag == "article":
             self._current_ppsn = None
             self._current_code = None
             self._current_is_online = None
+            self._current_world_name = None
+            self._current_game_instance_id = None
+            self._current_entry = None
+            self._capturing_name = False
+            self._name_buffer.clear()
+        elif tag == "a":
+            self._current_entry = None
+
+    def handle_data(self, data: str) -> None:
+        if self._capturing_name:
+            self._name_buffer.append(data)
 
 
 class ChannelSearchParser(HTMLParser):
@@ -528,6 +604,132 @@ def find_friend_by_world_code(
 
 
 @dataclass
+class FriendTreeNode:
+    code: str
+    ppsn: str
+    display_name: str
+    world_name: str
+    game_instance_id: str
+    channel_name: Optional[str] = None
+    children: list["FriendTreeNode"] = field(default_factory=list)
+
+
+def build_friend_tree(
+    root_code: str,
+    *,
+    delay: float = 0.5,
+    world_channels: Optional[dict[str, str]] = None,
+    logger: Optional[Callable[[str], None]] = None,
+    progress_callback: Optional[Callable[[int], None]] = None,
+) -> tuple[FriendTreeNode, int]:
+    """친구 목록을 깊이 우선 탐색하여 트리 형태로 반환한다."""
+
+    log = logger or (lambda message: None)
+    world_channels = world_channels or {}
+    visited_ppsns: set[str] = set()
+    total_count = 0
+    root_upper = root_code.upper()
+
+    if progress_callback:
+        progress_callback(0)
+
+    def explore(friend_code: str, depth: int) -> list[FriendTreeNode]:
+        nonlocal total_count
+        children: list[FriendTreeNode] = []
+        page = 1
+
+        while True:
+            url = FRIENDS_PAGE_URL.format(code=friend_code, page=page)
+            referer = PROFILE_URL.format(code=friend_code)
+            log(
+                f"[정보] 친구 {friend_code} 의 {page} 페이지에서 온라인 친구를 탐색합니다."
+            )
+            try:
+                html = fetch_html(url, referer=referer)
+            except HTTPError as exc:
+                if exc.code == 404:
+                    if depth == 0 and page == 1:
+                        raise RuntimeError(
+                            "친구 목록 페이지를 찾지 못했습니다. 친구 코드가 올바른지 확인하세요."
+                        ) from exc
+                    log(
+                        f"[경고] 친구 {friend_code} 의 {page} 페이지를 찾지 못했습니다(404)."
+                    )
+                    break
+                raise
+            except URLError as exc:
+                raise RuntimeError(f"친구 목록을 불러오지 못했습니다: {exc}") from exc
+
+            page_data = extract_entries_from_friends_page(html)
+            online_entries = [entry for entry in page_data.entries if entry.is_online]
+
+            if not online_entries:
+                log(
+                    f"[정보] 친구 {friend_code} 의 {page} 페이지에는 온라인 상태의 친구가 없습니다."
+                )
+                break
+
+            log(
+                f"[정보] 친구 {friend_code} 의 {page} 페이지에서 온라인 친구 {len(online_entries)}명을 확인했습니다."
+            )
+
+            for entry in online_entries:
+                if not entry.ppsn:
+                    log(
+                        f"[경고] 친구 {entry.code} 의 PPSN 정보를 확인할 수 없어 건너뜁니다."
+                    )
+                    continue
+                if entry.ppsn in visited_ppsns:
+                    log(
+                        f"[정보] 친구 {entry.code} ({entry.ppsn}) 는 이미 탐색되었습니다."
+                    )
+                    continue
+                entry_code_upper = entry.code.upper()
+                if entry_code_upper == root_upper or entry_code_upper == friend_code.upper():
+                    log(f"[정보] 친구 {entry.code} 항목은 순환을 피하기 위해 건너뜁니다.")
+                    continue
+
+                visited_ppsns.add(entry.ppsn)
+                total_count += 1
+                if progress_callback:
+                    progress_callback(total_count)
+
+                channel_name = None
+                if entry.game_instance_id:
+                    channel_name = world_channels.get(entry.game_instance_id)
+
+                node = FriendTreeNode(
+                    code=entry.code,
+                    ppsn=entry.ppsn,
+                    display_name=(entry.display_name or "").strip(),
+                    world_name=(entry.world_name or "").strip(),
+                    game_instance_id=(entry.game_instance_id or "").strip(),
+                    channel_name=channel_name,
+                )
+                log(
+                    f"[정보] 친구 {entry.code} ({entry.ppsn}) 의 하위 친구를 탐색합니다."
+                )
+                node.children = explore(entry.code, depth + 1)
+                children.append(node)
+
+            page += 1
+            if delay:
+                time.sleep(delay)
+
+        return children
+
+    root_node = FriendTreeNode(
+        code=root_code,
+        ppsn="",
+        display_name=root_code,
+        world_name="",
+        game_instance_id="",
+    )
+    root_node.children = explore(root_code, 0)
+    return root_node, total_count
+
+
+@dataclass
 class FilterConfig:
     networks: list[NetworkType]
     port: Optional[int]
@@ -571,11 +773,24 @@ class PacketCaptureApp:
         self.ppsn_copy_button: Optional[ttk.Button] = None
         self.channel_result_entry: Optional[ttk.Entry] = None
         self.channel_count_entry: Optional[ttk.Entry] = None
+        self.friend_queue: "queue.Queue[dict[str, object]]" = queue.Queue()
+        self.friend_search_thread: Optional[threading.Thread] = None
+        self.friend_search_running = False
+        self.friend_panel: Optional[ttk.LabelFrame] = None
+        self.friend_tree: Optional[ttk.Treeview] = None
+        self.friend_tree_root: Optional[FriendTreeNode] = None
+        self.friend_code_var = tk.StringVar()
+        self.friend_status_var = tk.StringVar(value="친구 코드를 입력하고 검색을 시작하세요.")
+        self.friend_count_var = tk.StringVar(value="0")
+        self.friend_toggle_button: Optional[ttk.Button] = None
+        self.friend_code_entry: Optional[ttk.Entry] = None
+        self.friend_search_button: Optional[ttk.Button] = None
 
         self._build_widgets()
         self._load_settings()
         self._poll_queue()
         self._poll_ppsn_queue()
+        self._poll_friend_queue()
         self.master.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ------------------------------------------------------------------
@@ -588,6 +803,7 @@ class PacketCaptureApp:
         self.master.rowconfigure(0, weight=1)
         main_frame.columnconfigure(0, weight=1)
         main_frame.columnconfigure(3, weight=0)
+        main_frame.columnconfigure(4, weight=0)
         main_frame.rowconfigure(2, weight=1)
         main_frame.rowconfigure(3, weight=1)
 
@@ -652,7 +868,7 @@ class PacketCaptureApp:
         # 제어 버튼
         button_frame = ttk.Frame(main_frame)
         button_frame.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-        button_frame.columnconfigure((0, 1, 2, 3), weight=1)
+        button_frame.columnconfigure((0, 1, 2, 3, 4), weight=1)
 
         self.start_button = ttk.Button(button_frame, text="캡쳐 시작", command=self.start_capture)
         self.start_button.grid(row=0, column=0, padx=4, sticky="ew")
@@ -670,6 +886,13 @@ class PacketCaptureApp:
             command=self._toggle_world_panel,
         )
         self.world_toggle_button.grid(row=0, column=3, padx=4, sticky="ew")
+
+        self.friend_toggle_button = ttk.Button(
+            button_frame,
+            text="친구검색",
+            command=self._toggle_friend_panel,
+        )
+        self.friend_toggle_button.grid(row=0, column=4, padx=4, sticky="ew")
 
         # 패킷 리스트
         packet_frame = ttk.LabelFrame(main_frame, text="캡쳐된 패킷")
@@ -772,6 +995,72 @@ class PacketCaptureApp:
         self.world_tree.configure(yscrollcommand=world_scroll.set)
 
         self.world_panel.grid_remove()
+
+        self.friend_panel = ttk.LabelFrame(main_frame, text="친구 검색", padding=8)
+        self.friend_panel.grid(row=0, column=4, rowspan=4, sticky="nsew", padx=(12, 0))
+        self.friend_panel.columnconfigure(0, weight=1)
+        self.friend_panel.rowconfigure(3, weight=1)
+
+        friend_input = ttk.Frame(self.friend_panel)
+        friend_input.grid(row=0, column=0, sticky="ew")
+        friend_input.columnconfigure(1, weight=1)
+
+        ttk.Label(friend_input, text="친구 코드 (5글자)").grid(
+            row=0, column=0, padx=(0, 8), pady=(0, 4), sticky="w"
+        )
+        self.friend_code_entry = ttk.Entry(friend_input, textvariable=self.friend_code_var, width=12)
+        self.friend_code_entry.grid(row=0, column=1, sticky="ew", pady=(0, 4))
+        self.friend_search_button = ttk.Button(
+            friend_input,
+            text="검색",
+            command=self._on_friend_search,
+        )
+        self.friend_search_button.grid(row=0, column=2, padx=(8, 0), pady=(0, 4))
+
+        # 상태 및 결과 표시
+        self.friend_status_var.set("친구 코드를 입력하고 검색을 시작하세요.")
+        friend_status_label = ttk.Label(
+            self.friend_panel,
+            textvariable=self.friend_status_var,
+            wraplength=260,
+            justify="left",
+        )
+        friend_status_label.grid(row=1, column=0, sticky="w", pady=(4, 0))
+
+        friend_count_frame = ttk.Frame(self.friend_panel)
+        friend_count_frame.grid(row=2, column=0, sticky="ew", pady=(4, 4))
+        ttk.Label(friend_count_frame, text="탐색한 친구 수").grid(row=0, column=0, sticky="w")
+        ttk.Label(friend_count_frame, textvariable=self.friend_count_var).grid(
+            row=0, column=1, sticky="w", padx=(4, 0)
+        )
+
+        friend_columns = ("code", "world", "channel", "game", "ppsn")
+        self.friend_tree = ttk.Treeview(
+            self.friend_panel,
+            columns=friend_columns,
+            show="tree headings",
+            selectmode="browse",
+            height=18,
+        )
+        self.friend_tree.heading("#0", text="친구 이름")
+        self.friend_tree.heading("code", text="친구 코드")
+        self.friend_tree.heading("world", text="월드 이름")
+        self.friend_tree.heading("channel", text="채널 이름")
+        self.friend_tree.heading("game", text="월드 코드")
+        self.friend_tree.heading("ppsn", text="PPSN")
+        self.friend_tree.column("#0", anchor="w", width=180, stretch=True)
+        self.friend_tree.column("code", anchor="center", width=90, stretch=False)
+        self.friend_tree.column("world", anchor="w", width=160, stretch=False)
+        self.friend_tree.column("channel", anchor="w", width=140, stretch=False)
+        self.friend_tree.column("game", anchor="w", width=170, stretch=False)
+        self.friend_tree.column("ppsn", anchor="w", width=170, stretch=False)
+        self.friend_tree.grid(row=3, column=0, sticky="nsew")
+
+        friend_scroll = ttk.Scrollbar(self.friend_panel, orient=tk.VERTICAL, command=self.friend_tree.yview)
+        friend_scroll.grid(row=3, column=1, sticky="ns")
+        self.friend_tree.configure(yscrollcommand=friend_scroll.set)
+
+        self.friend_panel.grid_remove()
 
     # ------------------------------------------------------------------
     # 이벤트 핸들러
@@ -1249,6 +1538,148 @@ class PacketCaptureApp:
         finally:
             self.ppsn_queue.put({"type": "finished", "task": "channel"})
 
+    # ------------------------------------------------------------------
+    # 친구 검색 기능
+    def _on_friend_search(self) -> None:
+        if self.friend_search_running:
+            messagebox.showinfo("알림", "친구 검색이 이미 진행 중입니다.")
+            return
+
+        code = self.friend_code_var.get().strip()
+        if not re.fullmatch(r"[A-Za-z0-9]{5}", code):
+            messagebox.showerror("입력 오류", "친구 코드는 영문 대소문자/숫자의 5글자여야 합니다.")
+            if self.friend_code_entry and self.friend_code_entry.winfo_exists():
+                self.friend_code_entry.focus_set()
+            return
+
+        world_map: dict[str, str] = {}
+        for channel_name, world_code in self.world_match_entries:
+            if world_code not in world_map:
+                world_map[world_code] = channel_name
+
+        self.friend_status_var.set("[정보] 친구 검색을 시작합니다.")
+        self.friend_count_var.set("0")
+        self._clear_friend_tree()
+        self.friend_search_running = True
+        if self.friend_search_button and self.friend_search_button.winfo_exists():
+            self.friend_search_button.config(state=tk.DISABLED)
+
+        thread = threading.Thread(
+            target=self._run_friend_search,
+            args=(code, world_map),
+            daemon=True,
+        )
+        self.friend_search_thread = thread
+        thread.start()
+
+    def _run_friend_search(self, code: str, world_map: dict[str, str]) -> None:
+        def log(message: str) -> None:
+            self.friend_queue.put({"type": "status", "text": message})
+
+        def progress(count: int) -> None:
+            self.friend_queue.put({"type": "progress", "count": count})
+
+        try:
+            tree, total = build_friend_tree(
+                code,
+                delay=0.5,
+                world_channels=world_map,
+                logger=log,
+                progress_callback=progress,
+            )
+        except HTTPError as exc:
+            self.friend_queue.put(
+                {
+                    "type": "error",
+                    "text": f"[오류] 친구 목록 요청 실패({exc.code}): {exc.reason}",
+                }
+            )
+        except URLError as exc:
+            self.friend_queue.put(
+                {
+                    "type": "error",
+                    "text": f"[오류] 네트워크 오류가 발생했습니다: {exc}",
+                }
+            )
+        except RuntimeError as exc:
+            self.friend_queue.put({"type": "error", "text": f"[오류] {exc}"})
+        except Exception as exc:  # pragma: no cover - 예기치 못한 예외 대비
+            self.friend_queue.put(
+                {"type": "error", "text": f"[오류] 알 수 없는 오류가 발생했습니다: {exc}"}
+            )
+        else:
+            self.friend_queue.put({"type": "result", "tree": tree, "count": total})
+            if total:
+                status_text = f"[결과] 총 {total}명의 온라인 친구를 탐색했습니다."
+            else:
+                status_text = "[결과] 온라인 상태의 친구를 찾지 못했습니다."
+            self.friend_queue.put({"type": "status", "text": status_text})
+        finally:
+            self.friend_queue.put({"type": "finished"})
+
+    def _clear_friend_tree(self) -> None:
+        self.friend_tree_root = None
+        if not self.friend_tree or not self.friend_tree.winfo_exists():
+            return
+        for child in self.friend_tree.get_children():
+            self.friend_tree.delete(child)
+
+    def _display_friend_tree(self, root_node: FriendTreeNode) -> None:
+        if not self.friend_tree or not self.friend_tree.winfo_exists():
+            return
+        for child in self.friend_tree.get_children():
+            self.friend_tree.delete(child)
+        root_id = self.friend_tree.insert(
+            "",
+            tk.END,
+            text=self._format_friend_node_text(root_node, is_root=True),
+            values=self._friend_node_values(root_node, is_root=True),
+            open=True,
+        )
+        for child in root_node.children:
+            self._insert_friend_tree_node(root_id, child)
+
+    def _insert_friend_tree_node(self, parent_id: str, node: FriendTreeNode) -> None:
+        if not self.friend_tree or not self.friend_tree.winfo_exists():
+            return
+        item_id = self.friend_tree.insert(
+            parent_id,
+            tk.END,
+            text=self._format_friend_node_text(node),
+            values=self._friend_node_values(node),
+            open=True,
+        )
+        for child in node.children:
+            self._insert_friend_tree_node(item_id, child)
+
+    def _format_friend_node_text(self, node: FriendTreeNode, *, is_root: bool = False) -> str:
+        name = (node.display_name or "").strip()
+        code = (node.code or "").upper()
+        if is_root:
+            if name and code and name.upper() != code:
+                return f"{name} (#{code})"
+            if code:
+                return f"#{code}"
+            return name or "시작 친구"
+        if name and code:
+            return f"{name} (#{code})"
+        if code:
+            return f"#{code}"
+        return name or "(이름 없음)"
+
+    def _friend_node_values(
+        self, node: FriendTreeNode, *, is_root: bool = False
+    ) -> tuple[str, str, str, str, str]:
+        code = (node.code or "").upper()
+        code_value = f"#{code}" if code else ""
+        if is_root:
+            return code_value, "", "", "", ""
+        world = node.world_name or ""
+        channel = node.channel_name or ""
+        game = node.game_instance_id or ""
+        ppsn = node.ppsn or ""
+        return code_value, world, channel, game, ppsn
+
     def _clear_ppsn_log(self) -> None:
         if not self.ppsn_log or not self.ppsn_log.winfo_exists():
             return
@@ -1387,6 +1818,47 @@ class PacketCaptureApp:
             self._refresh_packet_list()
 
         self.master.after(200, self._poll_queue)
+
+    def _poll_friend_queue(self) -> None:
+        tree_to_display: Optional[FriendTreeNode] = None
+        while True:
+            try:
+                item = self.friend_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            message_type = item.get("type")
+            if message_type == "status":
+                text = item.get("text")
+                if isinstance(text, str):
+                    self.friend_status_var.set(text)
+            elif message_type == "progress":
+                count = item.get("count")
+                if isinstance(count, int):
+                    self.friend_count_var.set(str(count))
+            elif message_type == "result":
+                tree = item.get("tree")
+                count = item.get("count")
+                if isinstance(tree, FriendTreeNode):
+                    self.friend_tree_root = tree
+                    tree_to_display = tree
+                if isinstance(count, int):
+                    self.friend_count_var.set(str(count))
+            elif message_type == "error":
+                text = item.get("text")
+                if isinstance(text, str):
+                    self.friend_status_var.set(text)
+                    messagebox.showerror("친구 검색 오류", text)
+            elif message_type == "finished":
+                self.friend_search_running = False
+                if self.friend_search_button and self.friend_search_button.winfo_exists():
+                    self.friend_search_button.config(state=tk.NORMAL)
+                self.friend_search_thread = None
+
+        if tree_to_display is not None:
+            self._display_friend_tree(tree_to_display)
+
+        self.master.after(200, self._poll_friend_queue)
 
     def _poll_ppsn_queue(self) -> None:
         finished_tasks: set[str] = set()
@@ -1651,6 +2123,22 @@ class PacketCaptureApp:
     def _set_running_state(self, running: bool) -> None:
         self.start_button.config(state=tk.DISABLED if running else tk.NORMAL)
         self.stop_button.config(state=tk.NORMAL if running else tk.DISABLED)
+
+    def _toggle_friend_panel(self) -> None:
+        if not self.friend_panel:
+            return
+        if self.friend_panel.winfo_ismapped():
+            self.friend_panel.grid_remove()
+            if self.friend_toggle_button and self.friend_toggle_button.winfo_exists():
+                self.friend_toggle_button.config(text="친구검색")
+        else:
+            self.friend_panel.grid()
+            if self.friend_toggle_button and self.friend_toggle_button.winfo_exists():
+                self.friend_toggle_button.config(text="친구검색 닫기")
+            if self.friend_tree_root:
+                self._display_friend_tree(self.friend_tree_root)
+            elif self.friend_tree:
+                self._clear_friend_tree()
 
     def _toggle_world_panel(self) -> None:
         if self.world_panel.winfo_ismapped():

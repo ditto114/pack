@@ -64,12 +64,13 @@ DEFAULT_REQUEST_HEADERS = {
     "Connection": "keep-alive",
 }
 FRIEND_CODE_PATTERN = re.compile(r"^/profile/([A-Za-z0-9]{5})$")
+VALUE_PREFIX_PATTERN = r"[\s:=\"'\x00-\x1F]*"
 WORLD_ID_PATTERN = re.compile(
-    r"w\s*o\s*r\s*l\s*d\s*i\s*d[\s:=\"']*(\d{17})",
+    rf"w\s*o\s*r\s*l\s*d\s*i\s*d{VALUE_PREFIX_PATTERN}(\d{{17}})",
     re.IGNORECASE,
 )
 CHANNEL_NAME_PATTERN = re.compile(
-    r"c\s*h\s*a\s*n\s*n\s*e\s*l\s*n\s*a\s*m\s*e[\s:=\"']*([A-Za-z]-[\uAC00-\uD7A3][0-9]{2,3})",
+    rf"c\s*h\s*a\s*n\s*n\s*e\s*l\s*n\s*a\s*m\s*e{VALUE_PREFIX_PATTERN}([A-Za-z]-[\uAC00-\uD7A3][0-9]{{2,3}})",
     re.IGNORECASE,
 )
 

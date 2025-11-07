@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import csv
 import html as html_lib
 import ipaddress
 import json
@@ -20,7 +21,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 from typing import Callable, Iterable, Optional, Union
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -633,17 +634,20 @@ def build_friend_tree(
     if progress_callback:
         progress_callback(0)
 
+    log(f"[정보] 루트 친구 {root_code} 의 친구 트리 탐색을 시작합니다.")
+
     def explore(friend_code: str, depth: int) -> list[FriendTreeNode]:
         nonlocal total_count
         children: list[FriendTreeNode] = []
         page = 1
+        indent = "  " * depth
+
+        log(f"[정보] {indent}친구 {friend_code} (깊이 {depth}) 탐색을 시작합니다.")
 
         while True:
             url = FRIENDS_PAGE_URL.format(code=friend_code, page=page)
             referer = PROFILE_URL.format(code=friend_code)
-            log(
-                f"[정보] 친구 {friend_code} 의 {page} 페이지에서 온라인 친구를 탐색합니다."
-            )
+            log(f"[정보] {indent}친구 {friend_code} 의 {page} 페이지 요청을 시작합니다.")
             try:
                 html = fetch_html(url, referer=referer)
             except HTTPError as exc:
@@ -653,7 +657,7 @@ def build_friend_tree(
                             "친구 목록 페이지를 찾지 못했습니다. 친구 코드가 올바른지 확인하세요."
                         ) from exc
                     log(
-                        f"[경고] 친구 {friend_code} 의 {page} 페이지를 찾지 못했습니다(404)."
+                        f"[경고] {indent}친구 {friend_code} 의 {page} 페이지를 찾지 못했습니다(404)."
                     )
                     break
                 raise
@@ -661,32 +665,37 @@ def build_friend_tree(
                 raise RuntimeError(f"친구 목록을 불러오지 못했습니다: {exc}") from exc
 
             page_data = extract_entries_from_friends_page(html)
+            log(
+                f"[정보] {indent}친구 {friend_code} 의 {page} 페이지에서 총 {len(page_data.entries)}명의 친구를 확인했습니다."
+            )
             online_entries = [entry for entry in page_data.entries if entry.is_online]
 
             if not online_entries:
                 log(
-                    f"[정보] 친구 {friend_code} 의 {page} 페이지에는 온라인 상태의 친구가 없습니다."
+                    f"[정보] {indent}친구 {friend_code} 의 {page} 페이지에는 온라인 상태의 친구가 없습니다."
                 )
                 break
 
             log(
-                f"[정보] 친구 {friend_code} 의 {page} 페이지에서 온라인 친구 {len(online_entries)}명을 확인했습니다."
+                f"[정보] {indent}친구 {friend_code} 의 {page} 페이지에서 온라인 친구 {len(online_entries)}명을 확인했습니다."
             )
 
             for entry in online_entries:
                 if not entry.ppsn:
                     log(
-                        f"[경고] 친구 {entry.code} 의 PPSN 정보를 확인할 수 없어 건너뜁니다."
+                        f"[경고] {indent}친구 {entry.code} 의 PPSN 정보를 확인할 수 없어 건너뜁니다."
                     )
                     continue
                 if entry.ppsn in visited_ppsns:
                     log(
-                        f"[정보] 친구 {entry.code} ({entry.ppsn}) 는 이미 탐색되었습니다."
+                        f"[정보] {indent}친구 {entry.code} ({entry.ppsn}) 는 이미 탐색되었습니다."
                     )
                     continue
                 entry_code_upper = entry.code.upper()
                 if entry_code_upper == root_upper or entry_code_upper == friend_code.upper():
-                    log(f"[정보] 친구 {entry.code} 항목은 순환을 피하기 위해 건너뜁니다.")
+                    log(
+                        f"[정보] {indent}친구 {entry.code} 항목은 순환을 피하기 위해 건너뜁니다."
+                    )
                     continue
 
                 visited_ppsns.add(entry.ppsn)
@@ -707,7 +716,7 @@ def build_friend_tree(
                     channel_name=channel_name,
                 )
                 log(
-                    f"[정보] 친구 {entry.code} ({entry.ppsn}) 의 하위 친구를 탐색합니다."
+                    f"[정보] {indent}친구 {entry.code} ({entry.ppsn}) 의 하위 친구를 탐색합니다."
                 )
                 node.children = explore(entry.code, depth + 1)
                 children.append(node)
@@ -715,6 +724,10 @@ def build_friend_tree(
             page += 1
             if delay:
                 time.sleep(delay)
+
+        log(
+            f"[정보] {indent}친구 {friend_code} 탐색을 마쳤습니다. 하위 친구 {len(children)}명을 정리했습니다."
+        )
 
         return children
 
@@ -726,6 +739,9 @@ def build_friend_tree(
         game_instance_id="",
     )
     root_node.children = explore(root_code, 0)
+    log(
+        f"[정보] 루트 친구 {root_code} 탐색을 완료했습니다. 총 {total_count}명의 온라인 친구를 기록했습니다."
+    )
     return root_node, total_count
 
 
@@ -762,6 +778,7 @@ class PacketCaptureApp:
         self.world_match_keys: set[tuple[str, str]] = set()
         self._world_match_buffer: str = ""
         self._world_last_clicked_item: Optional[str] = None
+        self.world_export_button: Optional[ttk.Button] = None
         self.ppsn_window: Optional[tk.Toplevel] = None
         self.ppsn_code_entry: Optional[ttk.Entry] = None
         self.ppsn_delay_entry: Optional[ttk.Entry] = None
@@ -993,6 +1010,14 @@ class PacketCaptureApp:
         world_scroll = ttk.Scrollbar(self.world_panel, orient=tk.VERTICAL, command=self.world_tree.yview)
         world_scroll.grid(row=1, column=1, sticky="ns")
         self.world_tree.configure(yscrollcommand=world_scroll.set)
+
+        self.world_export_button = ttk.Button(
+            self.world_panel,
+            text="CSV로 저장",
+            command=self._export_world_matches_to_csv,
+        )
+        self.world_export_button.grid(row=2, column=0, columnspan=2, sticky="e", pady=(8, 0))
+        self.world_export_button.config(state=tk.DISABLED)
 
         self.world_panel.grid_remove()
 
@@ -1579,7 +1604,11 @@ class PacketCaptureApp:
         def progress(count: int) -> None:
             self.friend_queue.put({"type": "progress", "count": count})
 
+        log(f"[정보] 친구 검색 백그라운드 작업을 시작합니다. 대상 코드: {code}")
+        log(f"[정보] 월드 매칭 보조 데이터 {len(world_map)}건을 준비했습니다.")
+
         try:
+            log("[정보] 친구 트리를 구성하는 중입니다...")
             tree, total = build_friend_tree(
                 code,
                 delay=0.5,
@@ -1588,6 +1617,7 @@ class PacketCaptureApp:
                 progress_callback=progress,
             )
         except HTTPError as exc:
+            log(f"[오류] 친구 목록 요청 실패({exc.code}): {exc.reason}")
             self.friend_queue.put(
                 {
                     "type": "error",
@@ -1595,6 +1625,7 @@ class PacketCaptureApp:
                 }
             )
         except URLError as exc:
+            log(f"[오류] 네트워크 오류가 발생했습니다: {exc}")
             self.friend_queue.put(
                 {
                     "type": "error",
@@ -1602,12 +1633,15 @@ class PacketCaptureApp:
                 }
             )
         except RuntimeError as exc:
+            log(f"[오류] {exc}")
             self.friend_queue.put({"type": "error", "text": f"[오류] {exc}"})
         except Exception as exc:  # pragma: no cover - 예기치 못한 예외 대비
+            log(f"[오류] 알 수 없는 오류가 발생했습니다: {exc}")
             self.friend_queue.put(
                 {"type": "error", "text": f"[오류] 알 수 없는 오류가 발생했습니다: {exc}"}
             )
         else:
+            log("[정보] 친구 트리 구성이 완료되었습니다. 결과를 정리합니다.")
             self.friend_queue.put({"type": "result", "tree": tree, "count": total})
             if total:
                 status_text = f"[결과] 총 {total}명의 온라인 친구를 탐색했습니다."
@@ -1615,6 +1649,7 @@ class PacketCaptureApp:
                 status_text = "[결과] 온라인 상태의 친구를 찾지 못했습니다."
             self.friend_queue.put({"type": "status", "text": status_text})
         finally:
+            log("[정보] 친구 검색 백그라운드 작업을 종료합니다.")
             self.friend_queue.put({"type": "finished"})
 
     def _clear_friend_tree(self) -> None:
@@ -2305,6 +2340,9 @@ class PacketCaptureApp:
         for channel_name, world_code in self.world_match_entries:
             self.world_tree.insert("", tk.END, values=(channel_name, world_code))
         self._world_last_clicked_item = None
+        if self.world_export_button and self.world_export_button.winfo_exists():
+            state = tk.NORMAL if self.world_match_entries else tk.DISABLED
+            self.world_export_button.config(state=state)
 
     def _on_world_tree_click(self, event: tk.Event) -> None:
         if not hasattr(self, "world_tree") or self.world_tree is None:
@@ -2316,6 +2354,38 @@ class PacketCaptureApp:
         if self._world_last_clicked_item == item_id:
             self._copy_world_code_to_clipboard(item_id)
         self._world_last_clicked_item = item_id
+
+    def _export_world_matches_to_csv(self) -> None:
+        if not self.world_match_entries:
+            messagebox.showinfo("알림", "저장할 월드 매칭 정보가 없습니다.")
+            return
+
+        timestamp = time.strftime("world_matches_%Y%m%d%H%M%S", time.localtime())
+        default_name = f"{timestamp}.csv"
+        initial_dir = str(Path(__file__).resolve().parent)
+        file_path = filedialog.asksaveasfilename(
+            parent=self.master,
+            title="월드 매칭 CSV 저장",
+            defaultextension=".csv",
+            initialfile=default_name,
+            initialdir=initial_dir,
+            filetypes=[("CSV 파일", "*.csv"), ("모든 파일", "*.*")],
+        )
+
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "w", newline="", encoding="utf-8-sig") as csv_file:
+                writer = csv.writer(csv_file)
+                writer.writerow(["채널 이름", "월드 코드"])
+                for channel_name, world_code in self.world_match_entries:
+                    writer.writerow([channel_name, world_code])
+        except OSError as exc:
+            messagebox.showerror("오류", f"CSV 파일 저장에 실패했습니다: {exc}")
+            return
+
+        messagebox.showinfo("완료", f"'{Path(file_path).name}' 파일로 저장했습니다.")
 
     def _copy_world_code_to_clipboard(self, item_id: str) -> None:
         if not hasattr(self, "world_tree") or self.world_tree is None:

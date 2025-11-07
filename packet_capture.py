@@ -269,6 +269,8 @@ class PacketCaptureApp:
         self.direction_filter_var = tk.StringVar(value="전체")
         self.world_match_entries: list[tuple[str, str]] = []
         self.world_match_keys: set[tuple[str, str]] = set()
+        self._world_match_buffer: str = ""
+        self._world_last_clicked_item: Optional[str] = None
         self.ppsn_window: Optional[tk.Toplevel] = None
         self.ppsn_code_entry: Optional[ttk.Entry] = None
         self.ppsn_delay_entry: Optional[ttk.Entry] = None
@@ -467,6 +469,7 @@ class PacketCaptureApp:
         self.world_tree.column("channel", anchor="w", width=120, stretch=True)
         self.world_tree.column("world", anchor="w", width=180, stretch=True)
         self.world_tree.grid(row=1, column=0, sticky="nsew")
+        self.world_tree.bind("<ButtonRelease-1>", self._on_world_tree_click)
 
         world_scroll = ttk.Scrollbar(self.world_panel, orient=tk.VERTICAL, command=self.world_tree.yview)
         world_scroll.grid(row=1, column=1, sticky="ns")
@@ -1133,6 +1136,11 @@ class PacketCaptureApp:
         for child in self.packet_tree.get_children():
             self.packet_tree.delete(child)
         self.packet_counter = 0
+        self.world_match_entries.clear()
+        self.world_match_keys.clear()
+        self._world_match_buffer = ""
+        self._world_last_clicked_item = None
+        self._refresh_world_table()
         self._set_detail_text("캡쳐를 시작하면 패킷이 여기에 표시됩니다.")
 
     def _set_running_state(self, running: bool) -> None:
@@ -1279,7 +1287,7 @@ class PacketCaptureApp:
     def _process_world_matching(self, item: PacketDisplay) -> None:
         if not item.utf8_text:
             return
-        matches = self._extract_world_matches(item.utf8_text)
+        matches = self._extract_world_matches_from_stream(item.utf8_text)
         if not matches:
             return
         added = False
@@ -1303,23 +1311,59 @@ class PacketCaptureApp:
             self.world_tree.delete(child)
         for channel_name, world_code in self.world_match_entries:
             self.world_tree.insert("", tk.END, values=(channel_name, world_code))
+        self._world_last_clicked_item = None
 
-    @staticmethod
-    def _extract_world_matches(text: str) -> list[tuple[str, str]]:
+    def _on_world_tree_click(self, event: tk.Event) -> None:
+        if not hasattr(self, "world_tree") or self.world_tree is None:
+            return
+        item_id = self.world_tree.identify_row(event.y)
+        if not item_id:
+            self._world_last_clicked_item = None
+            return
+        if self._world_last_clicked_item == item_id:
+            self._copy_world_code_to_clipboard(item_id)
+        self._world_last_clicked_item = item_id
+
+    def _copy_world_code_to_clipboard(self, item_id: str) -> None:
+        if not hasattr(self, "world_tree") or self.world_tree is None:
+            return
+        values = self.world_tree.item(item_id, "values")
+        if len(values) < 2:
+            return
+        world_code = values[1]
+        if not world_code:
+            return
+        try:
+            self.master.clipboard_clear()
+            self.master.clipboard_append(world_code)
+            self.master.update()
+        except tk.TclError:
+            pass
+
+    def _extract_world_matches_from_stream(self, text: Optional[str]) -> list[tuple[str, str]]:
+        if not text:
+            return []
+        self._world_match_buffer += text
+        if len(self._world_match_buffer) > 8192:
+            self._world_match_buffer = self._world_match_buffer[-8192:]
+
         matches: list[tuple[str, str]] = []
-        search_pos = 0
         while True:
-            channel_match = CHANNEL_NAME_PATTERN.search(text, search_pos)
+            channel_match = CHANNEL_NAME_PATTERN.search(self._world_match_buffer)
             if not channel_match:
                 break
-            channel_name = channel_match.group(1)
-            world_match = WORLD_ID_PATTERN.search(text, channel_match.end())
+            world_match = WORLD_ID_PATTERN.search(
+                self._world_match_buffer, channel_match.end()
+            )
             if world_match:
+                channel_name = channel_match.group(1)
                 world_code = world_match.group(1)
                 matches.append((world_code, channel_name))
-                search_pos = world_match.end()
+                self._world_match_buffer = self._world_match_buffer[world_match.end() :]
             else:
-                search_pos = channel_match.end()
+                self._world_match_buffer = self._world_match_buffer[channel_match.start() :]
+                break
+
         return matches
 
     def _save_settings(self) -> None:

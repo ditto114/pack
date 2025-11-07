@@ -40,6 +40,7 @@ class PacketDisplay:
     identifier: int = 0
     preview: str = ""
     direction: str = "unknown"
+    captured_at: float = 0.0
 
 
 NetworkType = Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
@@ -380,16 +381,18 @@ class PacketCaptureApp:
         packet_frame.columnconfigure(0, weight=1)
         packet_frame.rowconfigure(0, weight=1)
 
-        columns = ("summary", "direction", "preview")
+        columns = ("time", "summary", "direction", "preview")
         self.packet_tree = ttk.Treeview(
             packet_frame,
             columns=columns,
             show="headings",
             selectmode="browse",
         )
+        self.packet_tree.heading("time", text="시간")
         self.packet_tree.heading("summary", text="요약")
         self.packet_tree.heading("direction", text="방향")
         self.packet_tree.heading("preview", text="미리보기(한글)")
+        self.packet_tree.column("time", anchor="center", width=80, stretch=False)
         self.packet_tree.column("summary", anchor="w", stretch=True)
         self.packet_tree.column("direction", anchor="center", width=70, stretch=False)
         self.packet_tree.column("preview", anchor="w", width=200, stretch=False)
@@ -428,6 +431,13 @@ class PacketCaptureApp:
         self.detail_text.configure(yscrollcommand=detail_scroll.set, state=tk.NORMAL)
         self.detail_text.bind("<Key>", self._prevent_detail_edit)
         self.detail_text.bind("<<Paste>>", lambda _event: "break")
+
+        self.export_button = ttk.Button(
+            detail_frame,
+            text="TXT로 내보내기",
+            command=self._export_selected_packet,
+        )
+        self.export_button.grid(row=2, column=0, columnspan=2, sticky="e", padx=4, pady=(4, 8))
         self.detail_text.bind("<Button-3>", lambda _event: "break")
         self._set_detail_text("캡쳐를 시작하면 패킷이 여기에 표시됩니다.")
 
@@ -502,6 +512,7 @@ class PacketCaptureApp:
                     utf8_text=utf8_text,
                     preview=preview,
                     direction=direction,
+                    captured_at=time.time(),
                 )
             )
 
@@ -522,6 +533,7 @@ class PacketCaptureApp:
                     summary="[오류] 캡쳐 권한이 필요합니다.",
                     payload=None,
                     note="관리자 권한 또는 sudo로 다시 실행하세요.",
+                    captured_at=time.time(),
                 )
             )
             return
@@ -533,6 +545,7 @@ class PacketCaptureApp:
                     summary="[오류] 캡쳐 도중 문제가 발생했습니다.",
                     payload=None,
                     note=str(exc),
+                    captured_at=time.time(),
                 )
             )
             return
@@ -550,6 +563,7 @@ class PacketCaptureApp:
                     summary="[경고] 캡쳐 중지 과정에서 문제가 발생했습니다.",
                     payload=None,
                     note=str(exc),
+                    captured_at=time.time(),
                 )
             )
         finally:
@@ -860,6 +874,8 @@ class PacketCaptureApp:
             else:
                 self.packet_counter += 1
                 item.identifier = self.packet_counter
+                if not item.captured_at:
+                    item.captured_at = time.time()
                 if not item.preview:
                     item.preview = self._extract_hangul_preview(item.utf8_text)
                 self._process_world_matching(item)
@@ -939,8 +955,41 @@ class PacketCaptureApp:
         detail_text = self._format_detail_text(item)
         self._set_detail_text(detail_text)
 
+    def _export_selected_packet(self) -> None:
+        selection = self.packet_tree.selection()
+        if not selection:
+            messagebox.showinfo("알림", "먼저 저장할 패킷을 선택하세요.")
+            return
+
+        selected_id = selection[0]
+        item = next((pkt for pkt in self.packet_list_data if str(pkt.identifier) == selected_id), None)
+        if item is None:
+            messagebox.showerror("오류", "선택한 패킷 정보를 찾을 수 없습니다.")
+            return
+
+        detail_text = self._format_detail_text(item)
+        timestamp = time.strftime("%Y%m%d%H%M%S", time.localtime())
+        target_dir = Path(__file__).resolve().parent
+        file_path = target_dir / f"{timestamp}.txt"
+
+        if file_path.exists():
+            messagebox.showerror(
+                "오류",
+                f"같은 이름의 파일이 이미 존재합니다: {file_path.name}\n잠시 후 다시 시도하세요.",
+            )
+            return
+
+        try:
+            file_path.write_text(detail_text, encoding="utf-8")
+        except OSError as exc:
+            messagebox.showerror("오류", f"파일 저장에 실패했습니다: {exc}")
+            return
+
+        messagebox.showinfo("완료", f"'{file_path.name}' 파일로 저장했습니다.")
+
     def _format_detail_text(self, item: PacketDisplay) -> str:
-        lines = ["요약:", item.summary]
+        captured_time = self._format_capture_time(item.captured_at)
+        lines = [f"캡쳐 시각: {captured_time}", "", "요약:", item.summary]
         if item.note:
             lines.extend(["", "비고:", item.note])
 
@@ -1019,6 +1068,7 @@ class PacketCaptureApp:
                 item.preview = self._extract_hangul_preview(item.utf8_text)
             iid = str(item.identifier)
             values = (
+                self._format_capture_time(item.captured_at),
                 item.summary,
                 self._format_direction_text(item.direction),
                 item.preview,
@@ -1067,6 +1117,15 @@ class PacketCaptureApp:
         if filter_value == "미확인":
             return item.direction not in {"incoming", "outgoing"}
         return True
+
+    @staticmethod
+    def _format_capture_time(timestamp: float) -> str:
+        if timestamp <= 0:
+            return "--:--:--"
+        try:
+            return time.strftime("%H:%M:%S", time.localtime(timestamp))
+        except (OverflowError, ValueError):  # pragma: no cover - 드문 플랫폼 예외 대비
+            return "--:--:--"
 
     def _clear_capture_results(self) -> None:
         self.packet_list_data.clear()

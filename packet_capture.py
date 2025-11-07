@@ -65,7 +65,7 @@ DEFAULT_REQUEST_HEADERS = {
 FRIEND_CODE_PATTERN = re.compile(r"^/profile/([A-Za-z0-9]{5})$")
 WORLD_ID_PATTERN = re.compile(r"w\s*o\s*r\s*l\s*d\s*i\s*d\s*(\d{17})", re.IGNORECASE)
 CHANNEL_NAME_PATTERN = re.compile(
-    r"p\s*o\s*p\s*c\s*h\s*a\s*n\s*n\s*e\s*l\s*n\s*a\s*m\s*e\s*([A-Za-z]-[\uAC00-\uD7A3][0-9]{2,3})",
+    r"c\s*h\s*a\s*n\s*n\s*e\s*l\s*n\s*a\s*m\s*e\s*([A-Za-z]-[\uAC00-\uD7A3][0-9]{2,3})",
     re.IGNORECASE,
 )
 
@@ -1239,25 +1239,24 @@ class PacketCaptureApp:
         for child in self.world_tree.get_children():
             self.world_tree.delete(child)
         for channel_name, world_code in self.world_match_entries:
-            display_world = f"WorldId{world_code}"
-            self.world_tree.insert("", tk.END, values=(channel_name, display_world))
+            self.world_tree.insert("", tk.END, values=(channel_name, world_code))
 
     @staticmethod
     def _extract_world_matches(text: str) -> list[tuple[str, str]]:
         matches: list[tuple[str, str]] = []
         search_pos = 0
         while True:
-            world_match = WORLD_ID_PATTERN.search(text, search_pos)
-            if not world_match:
+            channel_match = CHANNEL_NAME_PATTERN.search(text, search_pos)
+            if not channel_match:
                 break
-            world_code = world_match.group(1)
-            channel_match = CHANNEL_NAME_PATTERN.search(text, world_match.end())
-            if channel_match:
-                channel_name = channel_match.group(1)
+            channel_name = channel_match.group(1)
+            world_match = WORLD_ID_PATTERN.search(text, channel_match.end())
+            if world_match:
+                world_code = world_match.group(1)
                 matches.append((world_code, channel_name))
-                search_pos = channel_match.end()
-            else:
                 search_pos = world_match.end()
+            else:
+                search_pos = channel_match.end()
         return matches
 
     def _save_settings(self) -> None:

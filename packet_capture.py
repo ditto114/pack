@@ -552,6 +552,7 @@ def fetch_friend_statuses(
     delay: float = 0.5,
     logger: Optional[Callable[[str], None]] = None,
     progress_callback: Optional[Callable[[int], None]] = None,
+    stop_event: Optional[threading.Event] = None,
 ) -> list[FriendStatusEntry]:
     """친구 목록 페이지를 순회하며 상태 정보를 수집한다."""
 
@@ -561,6 +562,9 @@ def fetch_friend_statuses(
     page = 1
 
     while True:
+        if stop_event and stop_event.is_set():
+            log("[정보] 친구 목록 수집이 사용자 요청으로 중지되었습니다.")
+            break
         url = FRIENDS_PAGE_URL.format(code=friend_code, page=page)
         log(f"[정보] {page} 페이지의 친구 목록을 요청합니다.")
         try:
@@ -584,12 +588,18 @@ def fetch_friend_statuses(
             break
 
         for entry in entries:
+            if stop_event and stop_event.is_set():
+                log("[정보] 친구 목록 항목 수집을 중지합니다.")
+                return results
             total += 1
             results.append(entry)
             if progress_callback:
                 progress_callback(total)
 
         page += 1
+        if stop_event and stop_event.is_set():
+            log("[정보] 친구 목록 페이지 순회를 중지합니다.")
+            break
         if delay:
             time.sleep(delay)
 
@@ -828,6 +838,7 @@ class PacketCaptureApp:
         self.direction_filter_var = tk.StringVar(value="전체")
         self.world_match_entries: list[tuple[str, str]] = []
         self.world_match_keys: set[tuple[str, str]] = set()
+        self.world_code_to_channels: dict[str, set[str]] = {}
         self._world_match_buffer: str = ""
         self._world_last_clicked_item: Optional[str] = None
         self.world_export_button: Optional[ttk.Button] = None
@@ -845,6 +856,7 @@ class PacketCaptureApp:
         self.friend_queue: "queue.Queue[dict[str, object]]" = queue.Queue()
         self.friend_search_thread: Optional[threading.Thread] = None
         self.friend_search_running = False
+        self.friend_search_phase = 1
         self.friend_panel: Optional[ttk.LabelFrame] = None
         self.friend_tree: Optional[ttk.Treeview] = None
         self.friend_code_var = tk.StringVar()
@@ -853,6 +865,14 @@ class PacketCaptureApp:
         self.friend_toggle_button: Optional[ttk.Button] = None
         self.friend_code_entry: Optional[ttk.Entry] = None
         self.friend_search_button: Optional[ttk.Button] = None
+        self.friend_stop_button: Optional[ttk.Button] = None
+        self.friend_search_stop_event = threading.Event()
+        self.friend_entries: list[FriendStatusEntry] = []
+        self.friend_entry_keys: set[tuple[str, str]] = set()
+        self.last_friend_primary_code: str = ""
+        self.world_match_order_var = tk.StringVar(value="world-first")
+        self.world_match_world_first_var = tk.BooleanVar(value=True)
+        self.world_match_channel_first_var = tk.BooleanVar(value=False)
 
         self._build_widgets()
         self._load_settings()
@@ -1038,11 +1058,40 @@ class PacketCaptureApp:
         self.world_panel = ttk.LabelFrame(main_frame, text="월드 매칭", padding=8)
         self.world_panel.grid(row=0, column=3, rowspan=4, sticky="nsew", padx=(12, 0))
         self.world_panel.columnconfigure(0, weight=1)
-        self.world_panel.rowconfigure(1, weight=1)
+        self.world_panel.rowconfigure(2, weight=1)
 
         ttk.Label(self.world_panel, text="감지된 월드-채널 매칭").grid(
             row=0, column=0, sticky="w", pady=(0, 4)
         )
+
+        order_frame = ttk.Frame(self.world_panel)
+        order_frame.grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        ttk.Label(order_frame, text="매칭 순서").grid(row=0, column=0, sticky="w")
+
+        def _set_world_match_order(order: str) -> None:
+            if order == "world-first":
+                self.world_match_world_first_var.set(True)
+                self.world_match_channel_first_var.set(False)
+            else:
+                self.world_match_world_first_var.set(False)
+                self.world_match_channel_first_var.set(True)
+            self.world_match_order_var.set(order)
+
+        ttk.Checkbutton(
+            order_frame,
+            text="월드ID → 채널 이름",
+            variable=self.world_match_world_first_var,
+            command=lambda: _set_world_match_order("world-first"),
+        ).grid(row=0, column=1, padx=(8, 0))
+        ttk.Checkbutton(
+            order_frame,
+            text="채널 이름 → 월드ID",
+            variable=self.world_match_channel_first_var,
+            command=lambda: _set_world_match_order("channel-first"),
+        ).grid(row=0, column=2, padx=(8, 0))
+
+        _set_world_match_order(self.world_match_order_var.get())
+
         world_columns = ("channel", "world")
         self.world_tree = ttk.Treeview(
             self.world_panel,
@@ -1055,11 +1104,11 @@ class PacketCaptureApp:
         self.world_tree.heading("world", text="월드 코드")
         self.world_tree.column("channel", anchor="w", width=120, stretch=True)
         self.world_tree.column("world", anchor="w", width=180, stretch=True)
-        self.world_tree.grid(row=1, column=0, sticky="nsew")
+        self.world_tree.grid(row=2, column=0, sticky="nsew")
         self.world_tree.bind("<ButtonRelease-1>", self._on_world_tree_click)
 
         world_scroll = ttk.Scrollbar(self.world_panel, orient=tk.VERTICAL, command=self.world_tree.yview)
-        world_scroll.grid(row=1, column=1, sticky="ns")
+        world_scroll.grid(row=2, column=1, sticky="ns")
         self.world_tree.configure(yscrollcommand=world_scroll.set)
 
         self.world_export_button = ttk.Button(
@@ -1067,7 +1116,7 @@ class PacketCaptureApp:
             text="CSV로 저장",
             command=self._export_world_matches_to_csv,
         )
-        self.world_export_button.grid(row=2, column=0, columnspan=2, sticky="e", pady=(8, 0))
+        self.world_export_button.grid(row=3, column=0, columnspan=2, sticky="e", pady=(8, 0))
         self.world_export_button.config(state=tk.DISABLED)
 
         self.world_panel.grid_remove()
@@ -1088,10 +1137,17 @@ class PacketCaptureApp:
         self.friend_code_entry.grid(row=0, column=1, sticky="ew", pady=(0, 4))
         self.friend_search_button = ttk.Button(
             friend_input,
-            text="검색",
+            text="1차 검색",
             command=self._on_friend_search,
         )
         self.friend_search_button.grid(row=0, column=2, padx=(8, 0), pady=(0, 4))
+        self.friend_stop_button = ttk.Button(
+            friend_input,
+            text="중지",
+            command=self._on_friend_search_stop,
+            state=tk.DISABLED,
+        )
+        self.friend_stop_button.grid(row=0, column=3, padx=(8, 0), pady=(0, 4))
 
         # 상태 및 결과 표시
         self.friend_status_var.set("친구 코드를 입력하고 검색을 시작하세요.")
@@ -1110,7 +1166,7 @@ class PacketCaptureApp:
             row=0, column=1, sticky="w", padx=(4, 0)
         )
 
-        friend_columns = ("status", "ppsn", "profile", "name", "world", "channel")
+        friend_columns = ("status", "ppsn", "profile", "name", "world", "channel_name", "channel")
         self.friend_tree = ttk.Treeview(
             self.friend_panel,
             columns=friend_columns,
@@ -1123,12 +1179,14 @@ class PacketCaptureApp:
         self.friend_tree.heading("profile", text="친구 코드 (프로필)")
         self.friend_tree.heading("name", text="친구 이름")
         self.friend_tree.heading("world", text="월드 이름")
+        self.friend_tree.heading("channel_name", text="채널 이름")
         self.friend_tree.heading("channel", text="채널 정보")
         self.friend_tree.column("status", anchor="center", width=80, stretch=False)
         self.friend_tree.column("ppsn", anchor="w", width=180, stretch=False)
         self.friend_tree.column("profile", anchor="center", width=120, stretch=False)
         self.friend_tree.column("name", anchor="w", width=180, stretch=True)
         self.friend_tree.column("world", anchor="w", width=200, stretch=True)
+        self.friend_tree.column("channel_name", anchor="w", width=180, stretch=True)
         self.friend_tree.column("channel", anchor="w", width=200, stretch=True)
         self.friend_tree.grid(row=3, column=0, sticky="nsew")
 
@@ -1137,6 +1195,7 @@ class PacketCaptureApp:
         self.friend_tree.configure(yscrollcommand=friend_scroll.set)
 
         self.friend_panel.grid_remove()
+        self._update_friend_search_button()
 
     # ------------------------------------------------------------------
     # 이벤트 핸들러
@@ -1616,85 +1675,218 @@ class PacketCaptureApp:
 
     # ------------------------------------------------------------------
     # 친구 검색 기능
+    def _update_friend_search_button(self) -> None:
+        if self.friend_search_button and self.friend_search_button.winfo_exists():
+            text = "1차 검색" if self.friend_search_phase == 1 else "2차 검색"
+            self.friend_search_button.config(text=text)
+
+    def _set_friend_search_running(self, running: bool) -> None:
+        self.friend_search_running = running
+        if self.friend_search_button and self.friend_search_button.winfo_exists():
+            state = tk.DISABLED if running else tk.NORMAL
+            self.friend_search_button.config(state=state)
+        if self.friend_stop_button and self.friend_stop_button.winfo_exists():
+            state = tk.NORMAL if running else tk.DISABLED
+            self.friend_stop_button.config(state=state)
+        if not running:
+            self.friend_search_stop_event.clear()
+
+    def _collect_second_phase_codes(self) -> list[str]:
+        codes: list[str] = []
+        seen: set[str] = set()
+        for entry in self.friend_entries:
+            profile = (entry.profile_code or "").strip().upper()
+            if not profile or profile in seen:
+                continue
+            if not re.fullmatch(r"[A-Za-z0-9]{5}", profile):
+                continue
+            seen.add(profile)
+            codes.append(profile)
+        return codes
+
     def _on_friend_search(self) -> None:
         if self.friend_search_running:
             messagebox.showinfo("알림", "친구 검색이 이미 진행 중입니다.")
             return
 
-        code = self.friend_code_var.get().strip()
-        if not re.fullmatch(r"[A-Za-z0-9]{5}", code):
-            messagebox.showerror("입력 오류", "친구 코드는 영문 대소문자/숫자의 5글자여야 합니다.")
-            if self.friend_code_entry and self.friend_code_entry.winfo_exists():
-                self.friend_code_entry.focus_set()
+        current_code_upper = self.friend_code_var.get().strip().upper()
+        if (
+            self.friend_search_phase != 1
+            and current_code_upper
+            and current_code_upper != self.last_friend_primary_code
+        ):
+            self.friend_search_phase = 1
+            self._update_friend_search_button()
+
+        if self.friend_search_phase == 1:
+            code = self.friend_code_var.get().strip()
+            if not re.fullmatch(r"[A-Za-z0-9]{5}", code):
+                messagebox.showerror("입력 오류", "친구 코드는 영문 대소문자/숫자의 5글자여야 합니다.")
+                if self.friend_code_entry and self.friend_code_entry.winfo_exists():
+                    self.friend_code_entry.focus_set()
+                return
+
+            self.friend_status_var.set("[정보] 1차 검색을 시작합니다.")
+            self.friend_count_var.set("0")
+            self._clear_friend_tree()
+            self.friend_search_stop_event.clear()
+            self.last_friend_primary_code = code.upper()
+            self._set_friend_search_running(True)
+
+            thread = threading.Thread(
+                target=self._run_friend_search,
+                args=([code], 1),
+                daemon=True,
+            )
+            self.friend_search_thread = thread
+            thread.start()
+        else:
+            codes = self._collect_second_phase_codes()
+            if not codes:
+                messagebox.showinfo("알림", "2차 검색에 사용할 친구 코드가 없습니다.")
+                return
+            self.friend_status_var.set("[정보] 2차 검색을 시작합니다.")
+            self.friend_search_stop_event.clear()
+            self._set_friend_search_running(True)
+            thread = threading.Thread(
+                target=self._run_friend_search,
+                args=(codes, 2),
+                daemon=True,
+            )
+            self.friend_search_thread = thread
+            thread.start()
+
+    def _on_friend_search_stop(self) -> None:
+        if not self.friend_search_running:
             return
+        self.friend_search_stop_event.set()
+        self.friend_status_var.set("[정보] 검색 중지 요청을 전달했습니다.")
+        if self.friend_stop_button and self.friend_stop_button.winfo_exists():
+            self.friend_stop_button.config(state=tk.DISABLED)
 
-        self.friend_status_var.set("[정보] 친구 검색을 시작합니다.")
-        self.friend_count_var.set("0")
-        self._clear_friend_tree()
-        self.friend_search_running = True
-        if self.friend_search_button and self.friend_search_button.winfo_exists():
-            self.friend_search_button.config(state=tk.DISABLED)
+    def _run_friend_search(self, codes: list[str], phase: int) -> None:
+        stop_event = self.friend_search_stop_event
 
-        thread = threading.Thread(
-            target=self._run_friend_search,
-            args=(code,),
-            daemon=True,
-        )
-        self.friend_search_thread = thread
-        thread.start()
-
-    def _run_friend_search(self, code: str) -> None:
         def log(message: str) -> None:
             self.friend_queue.put({"type": "status", "text": message})
 
-        def progress(count: int) -> None:
-            self.friend_queue.put({"type": "progress", "count": count})
+        total_count = 0
+        phase_entries = 0
 
-        log(f"[정보] 친구 검색 백그라운드 작업을 시작합니다. 대상 코드: {code}")
+        def progress(_: int) -> None:
+            nonlocal total_count
+            total_count += 1
+            self.friend_queue.put({"type": "progress", "count": total_count})
+
+        if not codes:
+            self.friend_queue.put({"type": "finished"})
+            return
+
+        description = "1차" if phase == 1 else "2차"
+        log(f"[정보] {description} 친구 검색 백그라운드 작업을 시작합니다. 대상 수: {len(codes)}")
 
         try:
-            log("[정보] 친구 목록을 수집하는 중입니다...")
-            entries = fetch_friend_statuses(
-                code,
-                delay=0.5,
-                logger=log,
-                progress_callback=progress,
-            )
-        except HTTPError as exc:
-            log(f"[오류] 친구 목록 요청 실패({exc.code}): {exc.reason}")
-            self.friend_queue.put(
-                {
-                    "type": "error",
-                    "text": f"[오류] 친구 목록 요청 실패({exc.code}): {exc.reason}",
-                }
-            )
-        except URLError as exc:
-            log(f"[오류] 네트워크 오류가 발생했습니다: {exc}")
-            self.friend_queue.put(
-                {
-                    "type": "error",
-                    "text": f"[오류] 네트워크 오류가 발생했습니다: {exc}",
-                }
-            )
-        except RuntimeError as exc:
-            log(f"[오류] {exc}")
-            self.friend_queue.put({"type": "error", "text": f"[오류] {exc}"})
-        except Exception as exc:  # pragma: no cover - 예기치 못한 예외 대비
-            log(f"[오류] 알 수 없는 오류가 발생했습니다: {exc}")
-            self.friend_queue.put(
-                {"type": "error", "text": f"[오류] 알 수 없는 오류가 발생했습니다: {exc}"}
-            )
-        else:
-            log("[정보] 친구 목록 수집이 완료되었습니다. 결과를 정리합니다.")
-            total = len(entries)
-            self.friend_queue.put({"type": "result", "entries": entries, "count": total})
-            if total:
-                status_text = f"[결과] 총 {total}명의 친구 데이터를 정리했습니다."
-            else:
-                status_text = "[결과] 수집된 친구 데이터가 없습니다."
-            self.friend_queue.put({"type": "status", "text": status_text})
+            for index, code in enumerate(codes, start=1):
+                if stop_event.is_set():
+                    break
+                log(
+                    f"[정보] {description} 검색 {index}/{len(codes)} - 친구 코드 {code} 의 목록을 수집합니다."
+                )
+                try:
+                    entries = fetch_friend_statuses(
+                        code,
+                        delay=0.5,
+                        logger=log,
+                        progress_callback=progress,
+                        stop_event=stop_event,
+                    )
+                except HTTPError as exc:
+                    error_text = f"[오류] 친구 목록 요청 실패({exc.code}): {exc.reason} (코드: {code})"
+                    log(error_text)
+                    self.friend_queue.put(
+                        {
+                            "type": "error",
+                            "text": error_text,
+                            "nonfatal": phase != 1,
+                        }
+                    )
+                    if phase == 1:
+                        break
+                    continue
+                except URLError as exc:
+                    error_text = f"[오류] 네트워크 오류가 발생했습니다: {exc} (코드: {code})"
+                    log(error_text)
+                    self.friend_queue.put(
+                        {
+                            "type": "error",
+                            "text": error_text,
+                            "nonfatal": phase != 1,
+                        }
+                    )
+                    if phase == 1:
+                        break
+                    continue
+                except RuntimeError as exc:
+                    error_text = f"[오류] {exc}"
+                    log(error_text)
+                    self.friend_queue.put(
+                        {
+                            "type": "error",
+                            "text": error_text,
+                            "nonfatal": phase != 1,
+                        }
+                    )
+                    if phase == 1:
+                        break
+                    continue
+                except Exception as exc:  # pragma: no cover - 예기치 못한 예외 대비
+                    error_text = f"[오류] 알 수 없는 오류가 발생했습니다: {exc}"
+                    log(error_text)
+                    self.friend_queue.put(
+                        {
+                            "type": "error",
+                            "text": error_text,
+                            "nonfatal": phase != 1,
+                        }
+                    )
+                    if phase == 1:
+                        break
+                    continue
+
+                if stop_event.is_set():
+                    break
+
+                filtered = [entry for entry in entries if isinstance(entry, FriendStatusEntry)]
+                if filtered:
+                    phase_entries += len(filtered)
+                    self.friend_queue.put(
+                        {
+                            "type": "result",
+                            "entries": filtered,
+                            "append": phase != 1,
+                            "phase": phase,
+                        }
+                    )
+                else:
+                    log(f"[정보] 친구 데이터가 없습니다. (코드: {code})")
         finally:
+            stopped = stop_event.is_set()
+            if phase_entries:
+                summary = f"[결과] {description} 검색으로 {phase_entries}명의 친구 데이터를 확인했습니다."
+            else:
+                summary = f"[결과] {description} 검색에서 수집된 친구 데이터가 없습니다."
+            if stopped:
+                summary = f"[정보] {description} 검색이 중지되었습니다. " + summary
+            self.friend_queue.put({"type": "status", "text": summary})
             log("[정보] 친구 검색 백그라운드 작업을 종료합니다.")
+            self.friend_queue.put(
+                {
+                    "type": "phase_finished",
+                    "phase": phase,
+                    "stopped": stopped,
+                    "had_entries": phase_entries > 0,
+                }
+            )
             self.friend_queue.put({"type": "finished"})
 
     def _clear_friend_tree(self) -> None:
@@ -1702,17 +1894,40 @@ class PacketCaptureApp:
             return
         for child in self.friend_tree.get_children():
             self.friend_tree.delete(child)
+        self.friend_entries = []
+        self.friend_entry_keys.clear()
 
-    def _display_friend_entries(self, entries: list[FriendStatusEntry]) -> None:
+    def _resolve_channel_name(self, channel_info: str) -> str:
+        if not channel_info:
+            return ""
+        names = self.world_code_to_channels.get(channel_info)
+        if not names:
+            return ""
+        return ", ".join(sorted(names))
+
+    def _display_friend_entries(
+        self, entries: list[FriendStatusEntry], *, append: bool = False
+    ) -> None:
         if not self.friend_tree or not self.friend_tree.winfo_exists():
             return
-        self.friend_tree.delete(*self.friend_tree.get_children())
+        if not append:
+            self.friend_tree.delete(*self.friend_tree.get_children())
+            self.friend_entries = []
+            self.friend_entry_keys.clear()
         for entry in entries:
+            if not isinstance(entry, FriendStatusEntry):
+                continue
             profile = (entry.profile_code or "").strip().upper()
             profile_value = f"#{profile}" if profile else ""
             name = (entry.display_name or "").strip()
             world = (entry.world_name or "").strip()
             channel = (entry.game_instance_id or "").strip()
+            key = (entry.ppsn.strip().upper(), profile)
+            if key in self.friend_entry_keys:
+                continue
+            self.friend_entry_keys.add(key)
+            self.friend_entries.append(entry)
+            channel_name = self._resolve_channel_name(channel)
             self.friend_tree.insert(
                 "",
                 tk.END,
@@ -1722,9 +1937,11 @@ class PacketCaptureApp:
                     profile_value,
                     name,
                     world,
+                    channel_name,
                     channel,
                 ),
             )
+        self.friend_count_var.set(str(len(self.friend_entries)))
 
     def _clear_ppsn_log(self) -> None:
         if not self.ppsn_log or not self.ppsn_log.winfo_exists():
@@ -1866,7 +2083,6 @@ class PacketCaptureApp:
         self.master.after(200, self._poll_queue)
 
     def _poll_friend_queue(self) -> None:
-        entries_to_display: Optional[list[FriendStatusEntry]] = None
         while True:
             try:
                 item = self.friend_queue.get_nowait()
@@ -1884,32 +2100,41 @@ class PacketCaptureApp:
                     self.friend_count_var.set(str(count))
             elif message_type == "result":
                 entries = item.get("entries")
-                count = item.get("count")
+                append_mode = bool(item.get("append"))
                 if isinstance(entries, list):
-                    filtered_entries: list[FriendStatusEntry] = []
-                    for entry in entries:
-                        if isinstance(entry, FriendStatusEntry):
-                            filtered_entries.append(entry)
-                    entries_to_display = filtered_entries
-                else:
-                    entries_to_display = []
+                    filtered_entries = [
+                        entry
+                        for entry in entries
+                        if isinstance(entry, FriendStatusEntry)
+                    ]
+                    if filtered_entries:
+                        self._display_friend_entries(filtered_entries, append=append_mode)
+                    elif not append_mode:
+                        self.friend_count_var.set(str(len(self.friend_entries)))
+                count = item.get("count")
                 if isinstance(count, int):
                     self.friend_count_var.set(str(count))
-                elif entries_to_display is not None:
-                    self.friend_count_var.set(str(len(entries_to_display)))
+                else:
+                    self.friend_count_var.set(str(len(self.friend_entries)))
             elif message_type == "error":
                 text = item.get("text")
+                nonfatal = bool(item.get("nonfatal"))
                 if isinstance(text, str):
                     self.friend_status_var.set(text)
-                    messagebox.showerror("친구 검색 오류", text)
+                    if not nonfatal:
+                        messagebox.showerror("친구 검색 오류", text)
+            elif message_type == "phase_finished":
+                phase_value = item.get("phase")
+                stopped = bool(item.get("stopped"))
+                had_entries = bool(item.get("had_entries"))
+                if phase_value == 1 and not stopped and had_entries:
+                    self.friend_search_phase = 2
+                else:
+                    self.friend_search_phase = 1
+                self._update_friend_search_button()
             elif message_type == "finished":
-                self.friend_search_running = False
-                if self.friend_search_button and self.friend_search_button.winfo_exists():
-                    self.friend_search_button.config(state=tk.NORMAL)
+                self._set_friend_search_running(False)
                 self.friend_search_thread = None
-
-        if entries_to_display is not None:
-            self._display_friend_entries(entries_to_display)
 
         self.master.after(200, self._poll_friend_queue)
 
@@ -2168,6 +2393,7 @@ class PacketCaptureApp:
         self.packet_counter = 0
         self.world_match_entries.clear()
         self.world_match_keys.clear()
+        self.world_code_to_channels.clear()
         self._world_match_buffer = ""
         self._world_last_clicked_item = None
         self._refresh_world_table()
@@ -2346,6 +2572,8 @@ class PacketCaptureApp:
             return False
         self.world_match_keys.add(key)
         self.world_match_entries.insert(0, (channel_name, world_code))
+        channels = self.world_code_to_channels.setdefault(world_code, set())
+        channels.add(channel_name)
         return True
 
     def _refresh_world_table(self) -> None:
@@ -2359,6 +2587,12 @@ class PacketCaptureApp:
         if self.world_export_button and self.world_export_button.winfo_exists():
             state = tk.NORMAL if self.world_match_entries else tk.DISABLED
             self.world_export_button.config(state=state)
+        self._refresh_friend_channel_names()
+
+    def _refresh_friend_channel_names(self) -> None:
+        if not self.friend_entries:
+            return
+        self._display_friend_entries(list(self.friend_entries), append=False)
 
     def _on_world_tree_click(self, event: tk.Event) -> None:
         if not hasattr(self, "world_tree") or self.world_tree is None:
@@ -2427,21 +2661,40 @@ class PacketCaptureApp:
             self._world_match_buffer = self._world_match_buffer[-8192:]
 
         matches: list[tuple[str, str]] = []
-        while True:
-            channel_match = CHANNEL_NAME_PATTERN.search(self._world_match_buffer)
-            if not channel_match:
-                break
-            world_match = WORLD_ID_PATTERN.search(
-                self._world_match_buffer, channel_match.end()
-            )
-            if world_match:
-                channel_name = channel_match.group(1)
-                world_code = world_match.group(1)
-                matches.append((world_code, channel_name))
-                self._world_match_buffer = self._world_match_buffer[world_match.end() :]
-            else:
-                self._world_match_buffer = self._world_match_buffer[channel_match.start() :]
-                break
+        order = self.world_match_order_var.get()
+
+        if order == "world-first":
+            while True:
+                world_match = WORLD_ID_PATTERN.search(self._world_match_buffer)
+                if not world_match:
+                    break
+                channel_match = CHANNEL_NAME_PATTERN.search(
+                    self._world_match_buffer, world_match.end()
+                )
+                if channel_match:
+                    world_code = world_match.group(1)
+                    channel_name = channel_match.group(1)
+                    matches.append((world_code, channel_name))
+                    self._world_match_buffer = self._world_match_buffer[channel_match.end() :]
+                else:
+                    self._world_match_buffer = self._world_match_buffer[world_match.start() :]
+                    break
+        else:
+            while True:
+                channel_match = CHANNEL_NAME_PATTERN.search(self._world_match_buffer)
+                if not channel_match:
+                    break
+                world_match = WORLD_ID_PATTERN.search(
+                    self._world_match_buffer, channel_match.end()
+                )
+                if world_match:
+                    channel_name = channel_match.group(1)
+                    world_code = world_match.group(1)
+                    matches.append((world_code, channel_name))
+                    self._world_match_buffer = self._world_match_buffer[world_match.end() :]
+                else:
+                    self._world_match_buffer = self._world_match_buffer[channel_match.start() :]
+                    break
 
         return matches
 

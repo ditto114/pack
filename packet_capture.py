@@ -109,8 +109,7 @@ WORLD_ID_PATTERN = re.compile(
     re.IGNORECASE,
 )
 CHANNEL_NAME_PATTERN = re.compile(
-    rf"(?:c\s*h\s*a\s*n\s*n\s*e\s*l\s*n\s*a\s*m\s*e{VALUE_PREFIX_PATTERN})?"
-    rf"([A-Za-z]-?[\uAC00-\uD7A3]-[0-9]{{2,3}})",
+    rf"c\s*h\s*a\s*n\s*n\s*e\s*l\s*n\s*a\s*m\s*e{VALUE_PREFIX_PATTERN}([A-Za-z]-[\uAC00-\uD7A3][0-9]{{2,3}})",
     re.IGNORECASE,
 )
 NOTIFICATION_CODE_PATTERN = re.compile(

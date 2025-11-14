@@ -50,6 +50,13 @@ NetworkType = Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
 
 
 @dataclass
+class WorldMatchEntry:
+    channel_name: str
+    world_code: str
+    captured_at: float
+
+
+@dataclass
 class FriendEntry:
     code: str
     ppsn: str
@@ -836,8 +843,8 @@ class PacketCaptureApp:
         self.lookup_running = False
         self.local_addresses = self._detect_local_addresses()
         self.direction_filter_var = tk.StringVar(value="전체")
-        self.world_match_entries: list[tuple[str, str]] = []
-        self.world_match_keys: set[tuple[str, str]] = set()
+        self.world_match_entries: list[WorldMatchEntry] = []
+        self.world_match_channels: set[str] = set()
         self.world_code_to_channels: dict[str, set[str]] = {}
         self._world_match_buffer: str = ""
         self._world_last_clicked_item: Optional[str] = None
@@ -870,9 +877,14 @@ class PacketCaptureApp:
         self.friend_entries: list[FriendStatusEntry] = []
         self.friend_entry_keys: set[tuple[str, str]] = set()
         self.last_friend_primary_code: str = ""
-        self.world_match_order_var = tk.StringVar(value="world-first")
-        self.world_match_world_first_var = tk.BooleanVar(value=True)
+        self.world_match_order_var = tk.StringVar(value="")
+        self.world_match_world_first_var = tk.BooleanVar(value=False)
         self.world_match_channel_first_var = tk.BooleanVar(value=False)
+        self.world_match_order_locked = False
+        self.notification_window: Optional[tk.Toplevel] = None
+        self.notification_text: Optional[tk.Text] = None
+        self.notification_logs: deque[str] = deque(maxlen=200)
+        self._notification_buffer: str = ""
 
         self._build_widgets()
         self._load_settings()
@@ -956,7 +968,7 @@ class PacketCaptureApp:
         # 제어 버튼
         button_frame = ttk.Frame(main_frame)
         button_frame.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-        button_frame.columnconfigure((0, 1, 2, 3, 4), weight=1)
+        button_frame.columnconfigure((0, 1, 2, 3, 4, 5), weight=1)
 
         self.start_button = ttk.Button(button_frame, text="캡쳐 시작", command=self.start_capture)
         self.start_button.grid(row=0, column=0, padx=4, sticky="ew")
@@ -981,6 +993,13 @@ class PacketCaptureApp:
             command=self._toggle_friend_panel,
         )
         self.friend_toggle_button.grid(row=0, column=4, padx=4, sticky="ew")
+
+        self.alert_button = ttk.Button(
+            button_frame,
+            text="알림",
+            command=self._show_notification_overlay,
+        )
+        self.alert_button.grid(row=0, column=5, padx=4, sticky="ew")
 
         # 패킷 리스트
         packet_frame = ttk.LabelFrame(main_frame, text="캡쳐된 패킷")
@@ -1068,31 +1087,22 @@ class PacketCaptureApp:
         order_frame.grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 4))
         ttk.Label(order_frame, text="매칭 순서").grid(row=0, column=0, sticky="w")
 
-        def _set_world_match_order(order: str) -> None:
-            if order == "world-first":
-                self.world_match_world_first_var.set(True)
-                self.world_match_channel_first_var.set(False)
-            else:
-                self.world_match_world_first_var.set(False)
-                self.world_match_channel_first_var.set(True)
-            self.world_match_order_var.set(order)
-
         ttk.Checkbutton(
             order_frame,
             text="월드ID → 채널 이름",
             variable=self.world_match_world_first_var,
-            command=lambda: _set_world_match_order("world-first"),
+            command=self._on_world_first_toggle,
         ).grid(row=0, column=1, padx=(8, 0))
         ttk.Checkbutton(
             order_frame,
             text="채널 이름 → 월드ID",
             variable=self.world_match_channel_first_var,
-            command=lambda: _set_world_match_order("channel-first"),
+            command=self._on_channel_first_toggle,
         ).grid(row=0, column=2, padx=(8, 0))
 
-        _set_world_match_order(self.world_match_order_var.get())
+        self._set_world_match_order_ui(None)
 
-        world_columns = ("channel", "world")
+        world_columns = ("captured_at", "channel", "world")
         self.world_tree = ttk.Treeview(
             self.world_panel,
             columns=world_columns,
@@ -1100,8 +1110,10 @@ class PacketCaptureApp:
             selectmode="browse",
             height=12,
         )
+        self.world_tree.heading("captured_at", text="캡쳐 시간")
         self.world_tree.heading("channel", text="채널 이름")
         self.world_tree.heading("world", text="월드 코드")
+        self.world_tree.column("captured_at", anchor="center", width=90, stretch=False)
         self.world_tree.column("channel", anchor="w", width=120, stretch=True)
         self.world_tree.column("world", anchor="w", width=180, stretch=True)
         self.world_tree.grid(row=2, column=0, sticky="nsew")
@@ -1111,12 +1123,22 @@ class PacketCaptureApp:
         world_scroll.grid(row=2, column=1, sticky="ns")
         self.world_tree.configure(yscrollcommand=world_scroll.set)
 
+        world_button_frame = ttk.Frame(self.world_panel)
+        world_button_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        world_button_frame.columnconfigure(1, weight=1)
+
+        ttk.Button(
+            world_button_frame,
+            text="기록 삭제",
+            command=self._clear_world_matches,
+        ).grid(row=0, column=0, sticky="w")
+
         self.world_export_button = ttk.Button(
-            self.world_panel,
+            world_button_frame,
             text="CSV로 저장",
             command=self._export_world_matches_to_csv,
         )
-        self.world_export_button.grid(row=3, column=0, columnspan=2, sticky="e", pady=(8, 0))
+        self.world_export_button.grid(row=0, column=1, sticky="e")
         self.world_export_button.config(state=tk.DISABLED)
 
         self.world_panel.grid_remove()
@@ -1196,6 +1218,34 @@ class PacketCaptureApp:
 
         self.friend_panel.grid_remove()
         self._update_friend_search_button()
+
+    def _set_world_match_order_ui(self, order: Optional[str], *, locked: Optional[bool] = None) -> None:
+        if order == "world-first":
+            self.world_match_order_var.set("world-first")
+            self.world_match_world_first_var.set(True)
+            self.world_match_channel_first_var.set(False)
+        elif order == "channel-first":
+            self.world_match_order_var.set("channel-first")
+            self.world_match_world_first_var.set(False)
+            self.world_match_channel_first_var.set(True)
+        else:
+            self.world_match_order_var.set("")
+            self.world_match_world_first_var.set(False)
+            self.world_match_channel_first_var.set(False)
+        if locked is not None:
+            self.world_match_order_locked = locked
+
+    def _on_world_first_toggle(self) -> None:
+        if self.world_match_world_first_var.get():
+            self._set_world_match_order_ui("world-first", locked=True)
+        else:
+            self._set_world_match_order_ui(None, locked=False)
+
+    def _on_channel_first_toggle(self) -> None:
+        if self.world_match_channel_first_var.get():
+            self._set_world_match_order_ui("channel-first", locked=True)
+        else:
+            self._set_world_match_order_ui(None, locked=False)
 
     # ------------------------------------------------------------------
     # 이벤트 핸들러
@@ -2062,6 +2112,7 @@ class PacketCaptureApp:
                 if not item.preview:
                     item.preview = self._extract_hangul_preview(item.utf8_text)
                 self._process_world_matching(item)
+                self._process_notification_stream(item.utf8_text, item.captured_at)
                 self.packet_list_data.insert(0, item)
                 if max_packets and max_packets > 0:
                     while len(self.packet_list_data) > max_packets:
@@ -2386,18 +2437,27 @@ class PacketCaptureApp:
         except (OverflowError, ValueError):  # pragma: no cover - 드문 플랫폼 예외 대비
             return "--:--:--"
 
-    def _clear_capture_results(self) -> None:
+    def _clear_capture_results(self, *, clear_world: bool = False) -> None:
         self.packet_list_data.clear()
         for child in self.packet_tree.get_children():
             self.packet_tree.delete(child)
         self.packet_counter = 0
+        self._world_match_buffer = ""
+        self._notification_buffer = ""
+        self._world_last_clicked_item = None
+        if clear_world:
+            self._clear_world_matches()
+        self._set_detail_text("캡쳐를 시작하면 패킷이 여기에 표시됩니다.")
+
+    def _clear_world_matches(self) -> None:
         self.world_match_entries.clear()
-        self.world_match_keys.clear()
+        self.world_match_channels.clear()
         self.world_code_to_channels.clear()
         self._world_match_buffer = ""
         self._world_last_clicked_item = None
+        self._set_world_match_order_ui(None, locked=False)
         self._refresh_world_table()
-        self._set_detail_text("캡쳐를 시작하면 패킷이 여기에 표시됩니다.")
+        self._refresh_friend_channel_names()
 
     def _set_running_state(self, running: bool) -> None:
         self.start_button.config(state=tk.DISABLED if running else tk.NORMAL)
@@ -2562,16 +2622,22 @@ class PacketCaptureApp:
             return
         added = False
         for world_code, channel_name in matches:
-            added = self._add_world_match(world_code, channel_name) or added
+            added = self._add_world_match(world_code, channel_name, item.captured_at) or added
         if added:
             self._refresh_world_table()
 
-    def _add_world_match(self, world_code: str, channel_name: str) -> bool:
-        key = (world_code, channel_name)
-        if key in self.world_match_keys:
+    def _add_world_match(self, world_code: str, channel_name: str, captured_at: float) -> bool:
+        channel_name = channel_name.strip()
+        if not channel_name:
             return False
-        self.world_match_keys.add(key)
-        self.world_match_entries.insert(0, (channel_name, world_code))
+        normalized_channel = channel_name.upper()
+        if normalized_channel in self.world_match_channels:
+            return False
+        self.world_match_channels.add(normalized_channel)
+        if captured_at <= 0:
+            captured_at = time.time()
+        entry = WorldMatchEntry(channel_name=channel_name, world_code=world_code, captured_at=captured_at)
+        self.world_match_entries.insert(0, entry)
         channels = self.world_code_to_channels.setdefault(world_code, set())
         channels.add(channel_name)
         return True
@@ -2581,8 +2647,12 @@ class PacketCaptureApp:
             return
         for child in self.world_tree.get_children():
             self.world_tree.delete(child)
-        for channel_name, world_code in self.world_match_entries:
-            self.world_tree.insert("", tk.END, values=(channel_name, world_code))
+        for entry in self.world_match_entries:
+            self.world_tree.insert(
+                "",
+                tk.END,
+                values=(self._format_capture_time(entry.captured_at), entry.channel_name, entry.world_code),
+            )
         self._world_last_clicked_item = None
         if self.world_export_button and self.world_export_button.winfo_exists():
             state = tk.NORMAL if self.world_match_entries else tk.DISABLED
@@ -2593,6 +2663,83 @@ class PacketCaptureApp:
         if not self.friend_entries:
             return
         self._display_friend_entries(list(self.friend_entries), append=False)
+
+    def _show_notification_overlay(self) -> None:
+        if self.notification_window and self.notification_window.winfo_exists():
+            self.notification_window.deiconify()
+            self.notification_window.lift()
+            return
+
+        self.notification_window = tk.Toplevel(self.master)
+        self.notification_window.title("알림 로그")
+        self.notification_window.attributes("-topmost", True)
+        self.notification_window.geometry("320x240")
+        self.notification_window.protocol("WM_DELETE_WINDOW", self._close_notification_overlay)
+
+        self.notification_window.columnconfigure(0, weight=1)
+        self.notification_window.rowconfigure(0, weight=1)
+
+        frame = ttk.Frame(self.notification_window, padding=8)
+        frame.grid(row=0, column=0, sticky="nsew")
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(0, weight=1)
+
+        self.notification_text = tk.Text(frame, state=tk.DISABLED, wrap="none")
+        self.notification_text.grid(row=0, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self.notification_text.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
+        self.notification_text.configure(yscrollcommand=scroll.set)
+
+        self._refresh_notification_overlay()
+
+    def _close_notification_overlay(self) -> None:
+        if self.notification_window and self.notification_window.winfo_exists():
+            self.notification_window.destroy()
+        self.notification_window = None
+        self.notification_text = None
+
+    def _refresh_notification_overlay(self) -> None:
+        if not self.notification_text or not self.notification_text.winfo_exists():
+            return
+        self.notification_text.config(state=tk.NORMAL)
+        self.notification_text.delete("1.0", tk.END)
+        for line in self.notification_logs:
+            self.notification_text.insert(tk.END, line + "\n")
+        self.notification_text.config(state=tk.DISABLED)
+        self.notification_text.see(tk.END)
+
+    def _append_notification_entry(self, captured_at: float, code: str) -> None:
+        if captured_at <= 0:
+            captured_at = time.time()
+        timestamp = time.strftime("%H:%M:%S", time.localtime(captured_at))
+        message = f"{timestamp} {code}"
+        self.notification_logs.append(message)
+        self._refresh_notification_overlay()
+
+    def _process_notification_stream(self, text: Optional[str], captured_at: float) -> None:
+        if not text:
+            return
+        self._notification_buffer += text
+        if len(self._notification_buffer) > 8192:
+            self._notification_buffer = self._notification_buffer[-8192:]
+
+        while True:
+            dev_index = self._notification_buffer.find("DevLogic")
+            if dev_index == -1:
+                keep_length = max(len("DevLogic") + 8, 16)
+                if len(self._notification_buffer) > keep_length:
+                    self._notification_buffer = self._notification_buffer[-keep_length:]
+                break
+            channel_match = CHANNEL_NAME_PATTERN.search(
+                self._notification_buffer, dev_index + len("DevLogic")
+            )
+            if channel_match:
+                code = channel_match.group(1)
+                self._append_notification_entry(captured_at, code)
+                self._notification_buffer = self._notification_buffer[channel_match.end() :]
+            else:
+                self._notification_buffer = self._notification_buffer[dev_index:]
+                break
 
     def _on_world_tree_click(self, event: tk.Event) -> None:
         if not hasattr(self, "world_tree") or self.world_tree is None:
@@ -2628,9 +2775,15 @@ class PacketCaptureApp:
         try:
             with open(file_path, "w", newline="", encoding="utf-8-sig") as csv_file:
                 writer = csv.writer(csv_file)
-                writer.writerow(["채널 이름", "월드 코드"])
-                for channel_name, world_code in self.world_match_entries:
-                    writer.writerow([channel_name, world_code])
+                writer.writerow(["캡쳐 시간", "채널 이름", "월드 코드"])
+                for entry in reversed(self.world_match_entries):
+                    writer.writerow(
+                        [
+                            self._format_capture_time(entry.captured_at),
+                            entry.channel_name,
+                            entry.world_code,
+                        ]
+                    )
         except OSError as exc:
             messagebox.showerror("오류", f"CSV 파일 저장에 실패했습니다: {exc}")
             return
@@ -2641,9 +2794,9 @@ class PacketCaptureApp:
         if not hasattr(self, "world_tree") or self.world_tree is None:
             return
         values = self.world_tree.item(item_id, "values")
-        if len(values) < 2:
+        if len(values) < 3:
             return
-        world_code = values[1]
+        world_code = values[2]
         if not world_code:
             return
         try:
@@ -2663,7 +2816,7 @@ class PacketCaptureApp:
         matches: list[tuple[str, str]] = []
         order = self.world_match_order_var.get()
 
-        if order == "world-first":
+        if self.world_match_order_locked and order == "world-first":
             while True:
                 world_match = WORLD_ID_PATTERN.search(self._world_match_buffer)
                 if not world_match:
@@ -2679,7 +2832,7 @@ class PacketCaptureApp:
                 else:
                     self._world_match_buffer = self._world_match_buffer[world_match.start() :]
                     break
-        else:
+        elif self.world_match_order_locked and order == "channel-first":
             while True:
                 channel_match = CHANNEL_NAME_PATTERN.search(self._world_match_buffer)
                 if not channel_match:
@@ -2694,6 +2847,40 @@ class PacketCaptureApp:
                     self._world_match_buffer = self._world_match_buffer[world_match.end() :]
                 else:
                     self._world_match_buffer = self._world_match_buffer[channel_match.start() :]
+                    break
+        else:
+            while True:
+                channel_match = CHANNEL_NAME_PATTERN.search(self._world_match_buffer)
+                world_match = WORLD_ID_PATTERN.search(self._world_match_buffer)
+                if not channel_match and not world_match:
+                    break
+                if world_match and (not channel_match or world_match.start() <= channel_match.start()):
+                    channel_after = CHANNEL_NAME_PATTERN.search(
+                        self._world_match_buffer, world_match.end()
+                    )
+                    if channel_after:
+                        world_code = world_match.group(1)
+                        channel_name = channel_after.group(1)
+                        matches.append((world_code, channel_name))
+                        self._world_match_buffer = self._world_match_buffer[channel_after.end() :]
+                        self._set_world_match_order_ui("world-first", locked=False)
+                    else:
+                        self._world_match_buffer = self._world_match_buffer[world_match.start() :]
+                        break
+                elif channel_match:
+                    world_after = WORLD_ID_PATTERN.search(
+                        self._world_match_buffer, channel_match.end()
+                    )
+                    if world_after:
+                        world_code = world_after.group(1)
+                        channel_name = channel_match.group(1)
+                        matches.append((world_code, channel_name))
+                        self._world_match_buffer = self._world_match_buffer[world_after.end() :]
+                        self._set_world_match_order_ui("channel-first", locked=False)
+                    else:
+                        self._world_match_buffer = self._world_match_buffer[channel_match.start() :]
+                        break
+                else:
                     break
 
         return matches

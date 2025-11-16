@@ -112,6 +112,7 @@ CHANNEL_NAME_PATTERN = re.compile(
     rf"c\s*h\s*a\s*n\s*n\s*e\s*l\s*n\s*a\s*m\s*e{VALUE_PREFIX_PATTERN}([A-Za-z]-[\uAC00-\uD7A3][0-9]{{2,3}})",
     re.IGNORECASE,
 )
+ALPHA_TRIPLET_PATTERN = re.compile(r"[A-Za-z]{3}")
 
 
 class FriendListParser(HTMLParser):
@@ -886,6 +887,8 @@ class PacketCaptureApp:
         self.notification_logs: deque[str] = deque(maxlen=200)
         self._notification_buffer: str = ""
 
+        self.alpha3_filter_var = tk.BooleanVar(value=False)
+
         self._build_widgets()
         self._load_settings()
         self._poll_queue()
@@ -938,6 +941,13 @@ class PacketCaptureApp:
             sticky="w",
         )
         self.text_filter_var.trace_add("write", self._on_text_filter_change)
+
+        ttk.Checkbutton(
+            filter_frame,
+            text="알파벳 3글자 필터",
+            variable=self.alpha3_filter_var,
+            command=self._on_alpha3_filter_toggle,
+        ).grid(row=5, column=0, columnspan=2, sticky="w", padx=(8, 4), pady=(0, 8))
 
         ttk.Label(filter_frame, text="표시 최대 패킷 수").grid(
             row=3, column=0, padx=(8, 4), pady=(0, 8)
@@ -2359,6 +2369,9 @@ class PacketCaptureApp:
     def _on_direction_filter_change(self, *_: object) -> None:
         self._refresh_packet_list()
 
+    def _on_alpha3_filter_toggle(self) -> None:
+        self._refresh_packet_list()
+
     def _refresh_packet_list(self) -> None:
         filter_text = self.text_filter_var.get().strip().lower()
         direction_filter = self.direction_filter_var.get().strip()
@@ -2369,10 +2382,13 @@ class PacketCaptureApp:
             self.packet_tree.delete(child)
 
         visible_ids: list[str] = []
+        alpha_filter_enabled = self.alpha3_filter_var.get()
         for item in self.packet_list_data:
             if not self._matches_text_filter(item, filter_text):
                 continue
             if not self._matches_direction_filter(item, direction_filter):
+                continue
+            if alpha_filter_enabled and not self._has_alpha_triplet(item):
                 continue
             if not item.preview:
                 item.preview = self._extract_hangul_preview(item.utf8_text)
@@ -2407,6 +2423,12 @@ class PacketCaptureApp:
         if not item.utf8_text:
             return False
         return filter_text in item.utf8_text.lower()
+
+    @staticmethod
+    def _has_alpha_triplet(item: PacketDisplay) -> bool:
+        if not item.utf8_text:
+            return False
+        return bool(ALPHA_TRIPLET_PATTERN.search(item.utf8_text))
 
     @staticmethod
     def _format_direction_text(direction: str) -> str:
@@ -2891,6 +2913,7 @@ class PacketCaptureApp:
             "port": self.port_entry.get().strip(),
             "text_filter": self.text_filter_var.get().strip(),
             "max_packets": self.max_packets_var.get().strip(),
+            "alpha3_filter": self.alpha3_filter_var.get(),
         }
         try:
             with self.settings_path.open("w", encoding="utf-8") as fp:
@@ -2922,6 +2945,10 @@ class PacketCaptureApp:
         max_packets_value = data.get("max_packets")
         if isinstance(max_packets_value, str) and max_packets_value.strip():
             self.max_packets_var.set(max_packets_value)
+
+        alpha3_filter_value = data.get("alpha3_filter")
+        if isinstance(alpha3_filter_value, bool):
+            self.alpha3_filter_var.set(alpha3_filter_value)
 
 
 def main() -> None:

@@ -117,7 +117,9 @@ CHANNEL_NAME_PATTERN = re.compile(
     rf"c\s*h\s*a\s*n\s*n\s*e\s*l\s*n\s*a\s*m\s*e{VALUE_PREFIX_PATTERN}([A-Za-z]-[\uAC00-\uD7A3][0-9]{{2,3}})",
     re.IGNORECASE,
 )
-ALPHA_TRIPLET_PATTERN = re.compile(r"[A-Za-z]{3}")
+NOTIFICATION_CODE_PATTERN = re.compile(
+    r"([A-Za-z][\uAC00-\uD7A3]-[0-9]{2,3}|[A-Za-z]-[\uAC00-\uD7A3][0-9]{2,3})"
+)
 
 
 class FriendListParser(HTMLParser):
@@ -2923,13 +2925,13 @@ class PacketCaptureApp:
                 if len(self._notification_buffer) > keep_length:
                     self._notification_buffer = self._notification_buffer[-keep_length:]
                 break
-            channel_match = CHANNEL_NAME_PATTERN.search(
+            code_match = NOTIFICATION_CODE_PATTERN.search(
                 self._notification_buffer, dev_index + len("DevLogic")
             )
-            if channel_match:
-                code = channel_match.group(1)
+            if code_match:
+                code = code_match.group(1)
                 self._append_notification_entry(captured_at, code)
-                self._notification_buffer = self._notification_buffer[channel_match.end() :]
+                self._notification_buffer = self._notification_buffer[code_match.end() :]
             else:
                 self._notification_buffer = self._notification_buffer[dev_index:]
                 break

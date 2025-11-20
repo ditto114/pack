@@ -26,6 +26,11 @@ from typing import Callable, Iterable, Optional, Union
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+import pyautogui
+from pynput import mouse
+
+pyautogui.PAUSE = 0
+
 try:
     from scapy.all import AsyncSniffer, IP, IPv6, Raw, TCP, UDP  # type: ignore
 except ImportError as exc:  # pragma: no cover - scapy 미설치 환경 대비
@@ -888,6 +893,20 @@ class PacketCaptureApp:
         self.notification_text: Optional[tk.Text] = None
         self.notification_logs: deque[str] = deque(maxlen=200)
         self._notification_buffer: str = ""
+        self.notification_macro_enabled = False
+        self.notification_macro_running = False
+        self.notification_macro_pos1: Optional[tuple[int, int]] = None
+        self.notification_macro_pos2: Optional[tuple[int, int]] = None
+        self.macro_toggle_button: Optional[ttk.Button] = None
+        self.macro_setting_button: Optional[ttk.Button] = None
+        self.macro_status_label: Optional[ttk.Label] = None
+        self.macro_position_label: Optional[ttk.Label] = None
+        self._macro_thread: Optional[threading.Thread] = None
+        self._macro_stop_event = threading.Event()
+        self._macro_position_listener: Optional[mouse.Listener] = None
+        self._macro_capture_positions: list[tuple[int, int]] = []
+
+        self.alpha3_filter_var = tk.BooleanVar(value=False)
 
         self._build_widgets()
         self._load_settings()
@@ -941,6 +960,13 @@ class PacketCaptureApp:
             sticky="w",
         )
         self.text_filter_var.trace_add("write", self._on_text_filter_change)
+
+        ttk.Checkbutton(
+            filter_frame,
+            text="알파벳 3글자 필터",
+            variable=self.alpha3_filter_var,
+            command=self._on_alpha3_filter_toggle,
+        ).grid(row=5, column=0, columnspan=2, sticky="w", padx=(8, 4), pady=(0, 8))
 
         ttk.Label(filter_frame, text="표시 최대 패킷 수").grid(
             row=3, column=0, padx=(8, 4), pady=(0, 8)
@@ -2362,6 +2388,9 @@ class PacketCaptureApp:
     def _on_direction_filter_change(self, *_: object) -> None:
         self._refresh_packet_list()
 
+    def _on_alpha3_filter_toggle(self) -> None:
+        self._refresh_packet_list()
+
     def _refresh_packet_list(self) -> None:
         filter_text = self.text_filter_var.get().strip().lower()
         direction_filter = self.direction_filter_var.get().strip()
@@ -2372,10 +2401,13 @@ class PacketCaptureApp:
             self.packet_tree.delete(child)
 
         visible_ids: list[str] = []
+        alpha_filter_enabled = self.alpha3_filter_var.get()
         for item in self.packet_list_data:
             if not self._matches_text_filter(item, filter_text):
                 continue
             if not self._matches_direction_filter(item, direction_filter):
+                continue
+            if alpha_filter_enabled and not self._has_alpha_triplet(item):
                 continue
             if not item.preview:
                 item.preview = self._extract_hangul_preview(item.utf8_text)
@@ -2410,6 +2442,12 @@ class PacketCaptureApp:
         if not item.utf8_text:
             return False
         return filter_text in item.utf8_text.lower()
+
+    @staticmethod
+    def _has_alpha_triplet(item: PacketDisplay) -> bool:
+        if not item.utf8_text:
+            return False
+        return bool(ALPHA_TRIPLET_PATTERN.search(item.utf8_text))
 
     @staticmethod
     def _format_direction_text(direction: str) -> str:
@@ -2492,6 +2530,8 @@ class PacketCaptureApp:
     def _on_close(self) -> None:
         self.stop_capture()
         self._save_settings()
+        self._stop_macro_execution()
+        self._stop_macro_position_listener()
         self.master.destroy()
 
     def _prevent_detail_edit(self, event: tk.Event) -> str | None:
@@ -2680,26 +2720,48 @@ class PacketCaptureApp:
         self.notification_window.protocol("WM_DELETE_WINDOW", self._close_notification_overlay)
 
         self.notification_window.columnconfigure(0, weight=1)
-        self.notification_window.rowconfigure(0, weight=1)
+        self.notification_window.rowconfigure(1, weight=1)
 
         frame = ttk.Frame(self.notification_window, padding=8)
         frame.grid(row=0, column=0, sticky="nsew")
         frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(0, weight=1)
+        frame.rowconfigure(1, weight=1)
+
+        control_frame = ttk.Frame(frame)
+        control_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        control_frame.columnconfigure(2, weight=1)
+
+        self.macro_toggle_button = ttk.Button(
+            control_frame, text="매크로 시작", command=self._toggle_notification_macro
+        )
+        self.macro_toggle_button.grid(row=0, column=0, padx=(0, 4))
+
+        self.macro_setting_button = ttk.Button(
+            control_frame, text="설정", command=self._start_macro_position_capture
+        )
+        self.macro_setting_button.grid(row=0, column=1, padx=(0, 8))
+
+        self.macro_status_label = ttk.Label(control_frame, text="비활성화됨")
+        self.macro_status_label.grid(row=0, column=2, sticky="w")
+
+        self.macro_position_label = ttk.Label(control_frame, text="pos1/pos2 미설정")
+        self.macro_position_label.grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
         self.notification_text = tk.Text(frame, state=tk.DISABLED, wrap="none")
-        self.notification_text.grid(row=0, column=0, sticky="nsew")
+        self.notification_text.grid(row=1, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self.notification_text.yview)
-        scroll.grid(row=0, column=1, sticky="ns")
+        scroll.grid(row=1, column=1, sticky="ns")
         self.notification_text.configure(yscrollcommand=scroll.set)
 
         self._refresh_notification_overlay()
+        self._refresh_macro_ui()
 
     def _close_notification_overlay(self) -> None:
         if self.notification_window and self.notification_window.winfo_exists():
             self.notification_window.destroy()
         self.notification_window = None
         self.notification_text = None
+        self._stop_macro_position_listener()
 
     def _refresh_notification_overlay(self) -> None:
         if not self.notification_text or not self.notification_text.winfo_exists():
@@ -2718,6 +2780,136 @@ class PacketCaptureApp:
         message = f"{timestamp} {code}"
         self.notification_logs.append(message)
         self._refresh_notification_overlay()
+        self._trigger_notification_macro()
+
+    def _refresh_macro_ui(self) -> None:
+        if self.macro_toggle_button and self.macro_toggle_button.winfo_exists():
+            toggle_text = "매크로 중지" if self.notification_macro_enabled else "매크로 시작"
+            self.macro_toggle_button.config(text=toggle_text)
+
+        if self.macro_status_label and self.macro_status_label.winfo_exists():
+            if self.notification_macro_running:
+                status_text = "실행 중"
+            elif self.notification_macro_enabled:
+                status_text = "대기 중"
+            else:
+                status_text = "비활성화됨"
+            self.macro_status_label.config(text=status_text)
+
+        if self.macro_position_label and self.macro_position_label.winfo_exists():
+            if self.notification_macro_pos1 and self.notification_macro_pos2:
+                text = (
+                    f"pos1: {self.notification_macro_pos1} / "
+                    f"pos2: {self.notification_macro_pos2}"
+                )
+            elif self.notification_macro_pos1:
+                text = f"pos1: {self.notification_macro_pos1} / pos2 미설정"
+            else:
+                text = "pos1/pos2 미설정"
+            self.macro_position_label.config(text=text)
+
+    def _update_macro_status_text(self, text: str) -> None:
+        if self.macro_status_label and self.macro_status_label.winfo_exists():
+            self.macro_status_label.config(text=text)
+
+    def _toggle_notification_macro(self) -> None:
+        self.notification_macro_enabled = not self.notification_macro_enabled
+        if self.notification_macro_enabled:
+            self._macro_stop_event.clear()
+        else:
+            self._stop_macro_execution()
+        self._refresh_macro_ui()
+
+    def _start_macro_position_capture(self) -> None:
+        self._stop_macro_position_listener()
+        self._macro_capture_positions.clear()
+        self._update_macro_status_text("pos1 위치를 선택하세요.")
+        self._macro_position_listener = mouse.Listener(on_click=self._on_macro_position_click)
+        self._macro_position_listener.start()
+
+    def _stop_macro_position_listener(self) -> None:
+        if self._macro_position_listener:
+            self._macro_position_listener.stop()
+            self._macro_position_listener.join()
+            self._macro_position_listener = None
+
+    def _on_macro_position_click(self, x: float, y: float, button: mouse.Button, pressed: bool) -> None:
+        if not pressed or button != mouse.Button.left:
+            return
+        self._macro_capture_positions.append((int(x), int(y)))
+        if len(self._macro_capture_positions) >= 2:
+            positions = list(self._macro_capture_positions)
+            self._macro_capture_positions.clear()
+            self.master.after(0, lambda: self._finalize_macro_positions(positions))
+            self._stop_macro_position_listener()
+            return False
+        self.master.after(0, lambda: self._update_macro_status_text("pos2 위치를 선택하세요."))
+
+    def _finalize_macro_positions(self, positions: list[tuple[int, int]]) -> None:
+        if len(positions) >= 2:
+            self.notification_macro_pos1 = positions[0]
+            self.notification_macro_pos2 = positions[1]
+            self._update_macro_status_text("좌표 설정 완료")
+        else:
+            self._update_macro_status_text("좌표 설정 실패")
+        self._refresh_macro_ui()
+
+    def _trigger_notification_macro(self) -> None:
+        if not self.notification_macro_enabled:
+            return
+        if self.notification_macro_running:
+            return
+        if not self.notification_macro_pos1 or not self.notification_macro_pos2:
+            self._update_macro_status_text("좌표 설정 필요")
+            return
+
+        self.notification_macro_running = True
+        self._macro_stop_event.clear()
+        self._macro_thread = threading.Thread(target=self._run_notification_macro, daemon=True)
+        self._macro_thread.start()
+        self._refresh_macro_ui()
+
+    def _run_notification_macro(self) -> None:
+        try:
+            if not self.notification_macro_pos1 or not self.notification_macro_pos2:
+                return
+            self.master.after(0, lambda: self._update_macro_status_text("pos1 클릭 반복 중"))
+            if not self._click_until_right(self.notification_macro_pos1):
+                return
+            if self._macro_stop_event.is_set():
+                return
+            self.master.after(0, lambda: self._update_macro_status_text("pos2 클릭 반복 중"))
+            self._click_until_right(self.notification_macro_pos2)
+        finally:
+            self.notification_macro_running = False
+            self.master.after(0, self._refresh_macro_ui)
+
+    def _click_until_right(self, position: tuple[int, int]) -> bool:
+        right_clicked = threading.Event()
+
+        def on_click(_x: float, _y: float, button: mouse.Button, pressed: bool) -> bool | None:
+            if button == mouse.Button.right and pressed:
+                right_clicked.set()
+                return False
+            return None
+
+        listener = mouse.Listener(on_click=on_click)
+        listener.start()
+        try:
+            while not right_clicked.is_set() and not self._macro_stop_event.is_set():
+                pyautogui.click(position[0], position[1])
+                time.sleep(0.05)
+        finally:
+            listener.stop()
+            listener.join()
+        return right_clicked.is_set() and not self._macro_stop_event.is_set()
+
+    def _stop_macro_execution(self) -> None:
+        self._macro_stop_event.set()
+        self.notification_macro_running = False
+        if self._macro_thread and self._macro_thread.is_alive():
+            self._macro_thread.join(timeout=0.5)
+        self._macro_thread = None
 
     def _process_notification_stream(self, text: Optional[str], captured_at: float) -> None:
         if not text:
@@ -2894,6 +3086,13 @@ class PacketCaptureApp:
             "port": self.port_entry.get().strip(),
             "text_filter": self.text_filter_var.get().strip(),
             "max_packets": self.max_packets_var.get().strip(),
+            "alpha3_filter": self.alpha3_filter_var.get(),
+            "macro_pos1": list(self.notification_macro_pos1)
+            if self.notification_macro_pos1
+            else None,
+            "macro_pos2": list(self.notification_macro_pos2)
+            if self.notification_macro_pos2
+            else None,
         }
         try:
             with self.settings_path.open("w", encoding="utf-8") as fp:
@@ -2925,6 +3124,28 @@ class PacketCaptureApp:
         max_packets_value = data.get("max_packets")
         if isinstance(max_packets_value, str) and max_packets_value.strip():
             self.max_packets_var.set(max_packets_value)
+
+        alpha3_filter_value = data.get("alpha3_filter")
+        if isinstance(alpha3_filter_value, bool):
+            self.alpha3_filter_var.set(alpha3_filter_value)
+
+        macro_pos1_value = data.get("macro_pos1")
+        if (
+            isinstance(macro_pos1_value, list)
+            and len(macro_pos1_value) == 2
+            and all(isinstance(item, (int, float)) for item in macro_pos1_value)
+        ):
+            self.notification_macro_pos1 = (int(macro_pos1_value[0]), int(macro_pos1_value[1]))
+
+        macro_pos2_value = data.get("macro_pos2")
+        if (
+            isinstance(macro_pos2_value, list)
+            and len(macro_pos2_value) == 2
+            and all(isinstance(item, (int, float)) for item in macro_pos2_value)
+        ):
+            self.notification_macro_pos2 = (int(macro_pos2_value[0]), int(macro_pos2_value[1]))
+
+        self._refresh_macro_ui()
 
 
 def main() -> None:

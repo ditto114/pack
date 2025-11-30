@@ -19,6 +19,7 @@ from urllib.error import HTTPError, URLError
 
 import pyautogui
 from pynput import mouse
+from PIL import Image, ImageChops, ImageStat, ImageTk
 
 try:
     from scapy.all import AsyncSniffer, IP, IPv6, Raw, TCP, UDP  # type: ignore
@@ -107,11 +108,12 @@ class PacketCaptureApp:
         self.notification_macro_enabled = False
         self.notification_macro_running = False
         self.notification_macro_pos1: Optional[tuple[int, int]] = None
-        self.notification_macro_pos2: Optional[tuple[int, int]] = None
         self.macro_toggle_button: Optional[ttk.Button] = None
         self.macro_setting_button: Optional[ttk.Button] = None
         self.macro_status_label: Optional[ttk.Label] = None
         self.macro_position_label: Optional[ttk.Label] = None
+        self.notification_image_label: Optional[ttk.Label] = None
+        self._notification_display_image: Optional[ImageTk.PhotoImage] = None
         self._macro_thread: Optional[threading.Thread] = None
         self._macro_stop_event = threading.Event()
         self._macro_position_listener: Optional[mouse.Listener] = None
@@ -1927,15 +1929,17 @@ class PacketCaptureApp:
         self.notification_window = tk.Toplevel(self.master)
         self.notification_window.title("알림 로그")
         self.notification_window.attributes("-topmost", True)
-        self.notification_window.geometry("320x240")
+        self.notification_window.geometry("420x260")
         self.notification_window.protocol("WM_DELETE_WINDOW", self._close_notification_overlay)
 
         self.notification_window.columnconfigure(0, weight=1)
+        self.notification_window.columnconfigure(1, weight=0)
         self.notification_window.rowconfigure(1, weight=1)
 
         frame = ttk.Frame(self.notification_window, padding=8)
         frame.grid(row=0, column=0, sticky="nsew")
         frame.columnconfigure(0, weight=1)
+        frame.columnconfigure(2, weight=0)
         frame.rowconfigure(1, weight=1)
 
         control_frame = ttk.Frame(frame)
@@ -1955,7 +1959,7 @@ class PacketCaptureApp:
         self.macro_status_label = ttk.Label(control_frame, text="비활성화됨")
         self.macro_status_label.grid(row=0, column=2, sticky="w")
 
-        self.macro_position_label = ttk.Label(control_frame, text="pos1/pos2 미설정")
+        self.macro_position_label = ttk.Label(control_frame, text="pos1 미설정")
         self.macro_position_label.grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
         self.notification_text = tk.Text(frame, state=tk.DISABLED, wrap="none")
@@ -1963,6 +1967,12 @@ class PacketCaptureApp:
         scroll = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self.notification_text.yview)
         scroll.grid(row=1, column=1, sticky="ns")
         self.notification_text.configure(yscrollcommand=scroll.set)
+
+        image_frame = ttk.Frame(frame)
+        image_frame.grid(row=1, column=2, sticky="n")
+        ttk.Label(image_frame, text="캡쳐 미리보기").grid(row=0, column=0, pady=(0, 4))
+        self.notification_image_label = ttk.Label(image_frame, text="이미지 없음", relief=tk.SOLID)
+        self.notification_image_label.grid(row=1, column=0, padx=(8, 0))
 
         self._refresh_notification_overlay()
         self._refresh_macro_ui()
@@ -1984,14 +1994,20 @@ class PacketCaptureApp:
         self.notification_text.config(state=tk.DISABLED)
         self.notification_text.see(tk.END)
 
-    def _append_notification_entry(self, captured_at: float, code: str) -> None:
+    def _append_notification_message(
+        self, captured_at: float, message: str, *, parenthesize_time: bool = False, trigger_macro: bool = True
+    ) -> None:
         if captured_at <= 0:
             captured_at = time.time()
         timestamp = time.strftime("%H:%M:%S", time.localtime(captured_at))
-        message = f"{timestamp} {code}"
-        self.notification_logs.append(message)
+        formatted = f"({timestamp}) {message}" if parenthesize_time else f"{timestamp} {message}"
+        self.notification_logs.append(formatted)
         self._refresh_notification_overlay()
-        self._trigger_notification_macro()
+        if trigger_macro:
+            self._trigger_notification_macro()
+
+    def _append_notification_entry(self, captured_at: float, code: str) -> None:
+        self._append_notification_message(captured_at, code)
 
     def _refresh_macro_ui(self) -> None:
         if self.macro_toggle_button and self.macro_toggle_button.winfo_exists():
@@ -2008,15 +2024,10 @@ class PacketCaptureApp:
             self.macro_status_label.config(text=status_text)
 
         if self.macro_position_label and self.macro_position_label.winfo_exists():
-            if self.notification_macro_pos1 and self.notification_macro_pos2:
-                text = (
-                    f"pos1: {self.notification_macro_pos1} / "
-                    f"pos2: {self.notification_macro_pos2}"
-                )
-            elif self.notification_macro_pos1:
-                text = f"pos1: {self.notification_macro_pos1} / pos2 미설정"
+            if self.notification_macro_pos1:
+                text = f"pos1: {self.notification_macro_pos1}"
             else:
-                text = "pos1/pos2 미설정"
+                text = "pos1 미설정"
             self.macro_position_label.config(text=text)
 
     def _update_macro_status_text(self, text: str) -> None:
@@ -2048,18 +2059,16 @@ class PacketCaptureApp:
         if not pressed or button != mouse.Button.left:
             return
         self._macro_capture_positions.append((int(x), int(y)))
-        if len(self._macro_capture_positions) >= 2:
+        if len(self._macro_capture_positions) >= 1:
             positions = list(self._macro_capture_positions)
             self._macro_capture_positions.clear()
             self.master.after(0, lambda: self._finalize_macro_positions(positions))
             self._stop_macro_position_listener()
             return False
-        self.master.after(0, lambda: self._update_macro_status_text("pos2 위치를 선택하세요."))
 
     def _finalize_macro_positions(self, positions: list[tuple[int, int]]) -> None:
-        if len(positions) >= 2:
+        if len(positions) >= 1:
             self.notification_macro_pos1 = positions[0]
-            self.notification_macro_pos2 = positions[1]
             self._update_macro_status_text("좌표 설정 완료")
         else:
             self._update_macro_status_text("좌표 설정 실패")
@@ -2070,8 +2079,8 @@ class PacketCaptureApp:
             return
         if self.notification_macro_running:
             return
-        if not self.notification_macro_pos1 or not self.notification_macro_pos2:
-            self._update_macro_status_text("좌표 설정 필요")
+        if not self.notification_macro_pos1:
+            self._update_macro_status_text("pos1 설정 필요")
             return
 
         self.notification_macro_running = True
@@ -2082,38 +2091,30 @@ class PacketCaptureApp:
 
     def _run_notification_macro(self) -> None:
         try:
-            if not self.notification_macro_pos1 or not self.notification_macro_pos2:
-                return
-            self.master.after(0, lambda: self._update_macro_status_text("pos1 클릭 반복 중"))
-            if not self._click_until_right(self.notification_macro_pos1):
+            if not self.notification_macro_pos1:
                 return
             if self._macro_stop_event.is_set():
                 return
-            self.master.after(0, lambda: self._update_macro_status_text("pos2 클릭 반복 중"))
-            self._click_until_right(self.notification_macro_pos2)
+            self.master.after(0, lambda: self._update_macro_status_text("로그 대기 중"))
+
+            position = self.notification_macro_pos1
+            region = (position[0] - 2, position[1] - 2, 5, 5)
+            screenshot = pyautogui.screenshot(region=region)
+            output_path = Path.cwd() / "temp1.png"
+            screenshot.save(output_path)
+            self.master.after(0, lambda: self._display_notification_image(output_path))
+
+            similarity = self._calculate_image_similarity(output_path, Path.cwd() / "temp2.png")
+            if similarity is not None:
+                self.master.after(
+                    0,
+                    lambda: self._append_notification_message(
+                        time.time(), f"유사도: {similarity:.4f}", trigger_macro=False
+                    ),
+                )
         finally:
             self.notification_macro_running = False
             self.master.after(0, self._refresh_macro_ui)
-
-    def _click_until_right(self, position: tuple[int, int]) -> bool:
-        right_clicked = threading.Event()
-
-        def on_click(_x: float, _y: float, button: mouse.Button, pressed: bool) -> bool | None:
-            if button == mouse.Button.right and pressed:
-                right_clicked.set()
-                return False
-            return None
-
-        listener = mouse.Listener(on_click=on_click)
-        listener.start()
-        try:
-            while not right_clicked.is_set() and not self._macro_stop_event.is_set():
-                pyautogui.click(position[0], position[1])
-                time.sleep(0.05)
-        finally:
-            listener.stop()
-            listener.join()
-        return right_clicked.is_set() and not self._macro_stop_event.is_set()
 
     def _stop_macro_execution(self) -> None:
         self._macro_stop_event.set()
@@ -2122,9 +2123,32 @@ class PacketCaptureApp:
             self._macro_thread.join(timeout=0.5)
         self._macro_thread = None
 
+    def _display_notification_image(self, image_path: Path) -> None:
+        if not self.notification_image_label or not self.notification_image_label.winfo_exists():
+            return
+        with Image.open(image_path) as img:
+            display_image = img.resize((img.width * 10, img.height * 10), Image.NEAREST)
+            self._notification_display_image = ImageTk.PhotoImage(display_image)
+            self.notification_image_label.config(image=self._notification_display_image, text="")
+
+    @staticmethod
+    def _calculate_image_similarity(image1_path: Path, image2_path: Path) -> Optional[float]:
+        if not image2_path.exists():
+            return None
+        with Image.open(image1_path).convert("RGB") as img1, Image.open(image2_path).convert("RGB") as img2:
+            img2 = img2.resize(img1.size)
+            diff = ImageChops.difference(img1, img2)
+            stat = ImageStat.Stat(diff)
+            rms_values = stat.rms
+            avg_rms = sum(rms_values) / len(rms_values)
+            similarity = max(0.0, 1.0 - (avg_rms / 255.0))
+            return similarity
+
     def _process_notification_stream(self, text: Optional[str], captured_at: float) -> None:
         if not text:
             return
+        if "AdminLevel" in text:
+            self._append_notification_message(captured_at, "캐릭터 선택창", parenthesize_time=True)
         self._notification_buffer += text
         if len(self._notification_buffer) > 8192:
             self._notification_buffer = self._notification_buffer[-8192:]
@@ -2301,9 +2325,6 @@ class PacketCaptureApp:
             "macro_pos1": list(self.notification_macro_pos1)
             if self.notification_macro_pos1
             else None,
-            "macro_pos2": list(self.notification_macro_pos2)
-            if self.notification_macro_pos2
-            else None,
         }
         try:
             with self.settings_path.open("w", encoding="utf-8") as fp:
@@ -2347,14 +2368,6 @@ class PacketCaptureApp:
             and all(isinstance(item, (int, float)) for item in macro_pos1_value)
         ):
             self.notification_macro_pos1 = (int(macro_pos1_value[0]), int(macro_pos1_value[1]))
-
-        macro_pos2_value = data.get("macro_pos2")
-        if (
-            isinstance(macro_pos2_value, list)
-            and len(macro_pos2_value) == 2
-            and all(isinstance(item, (int, float)) for item in macro_pos2_value)
-        ):
-            self.notification_macro_pos2 = (int(macro_pos2_value[0]), int(macro_pos2_value[1]))
 
         self._refresh_macro_ui()
 

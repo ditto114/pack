@@ -18,7 +18,7 @@ from typing import Callable, Optional
 from urllib.error import HTTPError, URLError
 
 import pyautogui
-from pynput import mouse
+from pynput import keyboard, mouse
 from PIL import Image, ImageChops, ImageStat, ImageTk
 
 try:
@@ -123,6 +123,9 @@ class PacketCaptureApp:
         self._macro_position_listener: Optional[mouse.Listener] = None
         self._macro_capture_positions: list[tuple[int, int]] = []
         self._macro_waiting_for_second_log = False
+        self._macro_key_event = threading.Event()
+        self._macro_requested_action: Optional[str] = None
+        self._macro_keyboard_listener: Optional[keyboard.Listener] = None
         self._macro_settings_window: Optional[tk.Toplevel] = None
 
         self.alpha3_filter_var = tk.BooleanVar(value=False)
@@ -2064,7 +2067,10 @@ class PacketCaptureApp:
         if self.notification_macro_enabled:
             self._macro_stop_event.clear()
             self._macro_log_event.clear()
+            self._macro_key_event.clear()
+            self._macro_requested_action = None
             self._macro_waiting_for_second_log = False
+            self._start_macro_keyboard_listener()
             self._ensure_macro_thread()
         else:
             self._stop_macro_execution()
@@ -2076,6 +2082,34 @@ class PacketCaptureApp:
         self._update_macro_status_text("pos1, pos2, pos3, pos4 위치를 순서대로 선택하세요.")
         self._macro_position_listener = mouse.Listener(on_click=self._on_macro_position_click)
         self._macro_position_listener.start()
+
+    def _start_macro_keyboard_listener(self) -> None:
+        self._stop_macro_keyboard_listener()
+        self._macro_keyboard_listener = keyboard.Listener(on_press=self._on_macro_key_press)
+        self._macro_keyboard_listener.start()
+
+    def _stop_macro_keyboard_listener(self) -> None:
+        if self._macro_keyboard_listener:
+            self._macro_keyboard_listener.stop()
+            self._macro_keyboard_listener.join()
+            self._macro_keyboard_listener = None
+
+    def _on_macro_key_press(self, key: keyboard.Key | keyboard.KeyCode) -> None:
+        if not self.notification_macro_enabled:
+            return
+        try:
+            char = key.char if isinstance(key, keyboard.KeyCode) else None
+        except AttributeError:
+            char = None
+        if not char:
+            return
+        lowered = char.lower()
+        if lowered == "z":
+            self._macro_requested_action = "2A"
+            self._macro_key_event.set()
+        elif lowered == "x":
+            self._macro_requested_action = "2B"
+            self._macro_key_event.set()
 
     def _open_macro_settings_dialog(self) -> None:
         if getattr(self, "_macro_settings_window", None) and self._macro_settings_window.winfo_exists():
@@ -2185,28 +2219,12 @@ class PacketCaptureApp:
     def _trigger_notification_macro(self) -> None:
         if not self.notification_macro_enabled:
             return
-        if not (
-            self.notification_macro_pos1
-            and self.notification_macro_pos2
-            and self.notification_macro_pos3
-            and self.notification_macro_pos4
-        ):
-            self._update_macro_status_text("pos1~4 설정 필요")
-            return
 
         self._ensure_macro_thread()
         self._macro_log_event.set()
 
     def _ensure_macro_thread(self) -> None:
         if self.notification_macro_running and self._macro_thread and self._macro_thread.is_alive():
-            return
-        if not (
-            self.notification_macro_pos1
-            and self.notification_macro_pos2
-            and self.notification_macro_pos3
-            and self.notification_macro_pos4
-        ):
-            self._update_macro_status_text("pos1~4 설정 필요")
             return
 
         self.notification_macro_running = True
@@ -2220,55 +2238,23 @@ class PacketCaptureApp:
     def _run_notification_macro(self) -> None:
         try:
             while self.notification_macro_enabled and not self._macro_stop_event.is_set():
-                status_text = "추가 로그 대기 중 (pos1 클릭)" if self._macro_waiting_for_second_log else "로그 대기 중"
-                self.master.after(0, lambda text=status_text: self._update_macro_status_text(text))
-
-                if self._macro_waiting_for_second_log:
-                    if not (self.notification_macro_pos1 and self.notification_macro_pos2):
-                        self.master.after(0, lambda: self._update_macro_status_text("좌표 설정 필요"))
-                        break
-
-                    log_detected = self._click_until_next_log(self.notification_macro_pos1)
-                    if not log_detected:
-                        continue
-
-                    self._perform_clicks(self.notification_macro_pos2, count=20, interval=0.05)
-                    self.master.after(
-                        0,
-                        lambda: self._append_notification_message(
-                            time.time(), "추가 로그 감지 - pos2 클릭 후 종료", trigger_macro=False
-                        ),
-                    )
-                    self.notification_macro_enabled = False
-                    self._macro_stop_event.set()
-                    break
-
-                self._macro_log_event.wait(timeout=0.1)
-                if not self._macro_log_event.is_set():
-                    continue
-                self._macro_log_event.clear()
-                if not (
-                    self.notification_macro_pos1
-                    and self.notification_macro_pos2
-                    and self.notification_macro_pos3
-                    and self.notification_macro_pos4
-                ):
-                    self.master.after(0, lambda: self._update_macro_status_text("좌표 설정 필요"))
-                    break
-
+                self.master.after(
+                    0,
+                    lambda: self._update_macro_status_text("키 입력 대기 (Z: 2A, X: 2B)"),
+                )
+                self._macro_key_event.wait(timeout=0.1)
                 if self._macro_stop_event.is_set():
                     break
+                if not self._macro_key_event.is_set():
+                    continue
+                self._macro_key_event.clear()
+                action = self._macro_requested_action
+                self._macro_requested_action = None
 
-                similarity = self._capture_macro_image(self.notification_macro_pos1)
-                if similarity is not None:
-                    self.master.after(
-                        0,
-                        lambda value=similarity: self._append_notification_message(
-                            time.time(), f"유사도: {value:.4f}", trigger_macro=False
-                        ),
-                    )
-
-                if similarity is not None and similarity >= 0.999999:
+                if action == "2A":
+                    if not (self.notification_macro_pos3 and self.notification_macro_pos4):
+                        self.master.after(0, lambda: self._update_macro_status_text("pos3/pos4 설정 필요"))
+                        continue
                     time.sleep(1)
                     self._perform_clicks(self.notification_macro_pos3, count=1, interval=0.0)
                     time.sleep(0.25)
@@ -2277,15 +2263,32 @@ class PacketCaptureApp:
                     pyautogui.press("enter")
                     continue
 
-                self._macro_waiting_for_second_log = True
+                if action == "2B":
+                    if not (self.notification_macro_pos1 and self.notification_macro_pos2):
+                        self.master.after(0, lambda: self._update_macro_status_text("pos1/pos2 설정 필요"))
+                        continue
+                    self.master.after(0, lambda: self._update_macro_status_text("로그 대기 (pos1 클릭)"))
+                    log_detected = self._click_until_next_log(self.notification_macro_pos1, interval=0.05)
+                    if log_detected:
+                        self._perform_clicks(self.notification_macro_pos2, count=20, interval=0.05)
+                        self.master.after(
+                            0,
+                            lambda: self._append_notification_message(
+                                time.time(), "추가 로그 감지 - pos2 클릭 후 종료", trigger_macro=False
+                            ),
+                        )
+                    self.notification_macro_enabled = False
+                    self._macro_stop_event.set()
+                    break
         finally:
             self.notification_macro_running = False
             self._macro_waiting_for_second_log = False
             self.master.after(0, self._refresh_macro_ui)
+            self._stop_macro_keyboard_listener()
 
-    def _click_until_next_log(self, position: tuple[int, int]) -> bool:
+    def _click_until_next_log(self, position: tuple[int, int], *, interval: float = 0.05) -> bool:
         while self.notification_macro_enabled and not self._macro_stop_event.is_set():
-            if self._macro_log_event.wait(timeout=0.05):
+            if self._macro_log_event.wait(timeout=interval):
                 self._macro_log_event.clear()
                 return True
             pyautogui.click(position[0], position[1])
@@ -2294,11 +2297,13 @@ class PacketCaptureApp:
     def _stop_macro_execution(self) -> None:
         self._macro_stop_event.set()
         self._macro_log_event.set()
+        self._macro_key_event.set()
         self.notification_macro_running = False
         self._macro_waiting_for_second_log = False
         if self._macro_thread and self._macro_thread.is_alive():
             self._macro_thread.join(timeout=0.5)
         self._macro_thread = None
+        self._stop_macro_keyboard_listener()
 
     def _display_notification_image(self, image_path: Path) -> None:
         if not self.notification_image_label or not self.notification_image_label.winfo_exists():

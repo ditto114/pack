@@ -57,7 +57,7 @@ class PacketCaptureApp:
         self.stop_event = threading.Event()
         self.sniffer: Optional[AsyncSniffer] = None
         self.packet_counter = 0
-        self.settings_path = Path(__file__).resolve().with_name("packet_capture_settings.json")
+        self.settings_path = self._get_settings_path()
         self.ppsn_queue: "queue.Queue[dict[str, object]]" = queue.Queue()
         self.ppsn_thread: Optional[threading.Thread] = None
         self.lookup_running = False
@@ -1752,6 +1752,17 @@ class PacketCaptureApp:
         self._stop_macro_execution()
         self._stop_macro_position_listener()
         self.master.destroy()
+
+    def _get_settings_path(self) -> Path:
+        """설정 파일을 저장할 경로를 반환한다.
+
+        앱이 번들(예: .app)로 패키징된 경우 실행 경로가 읽기 전용일 수 있으므로,
+        항상 사용자 홈 디렉터리 아래 설정 전용 폴더를 사용한다.
+        """
+
+        settings_dir = Path.home() / ".packet_capture"
+        settings_dir.mkdir(parents=True, exist_ok=True)
+        return settings_dir / "packet_capture_settings.json"
 
     def _prevent_detail_edit(self, event: tk.Event) -> str | None:
         allowed_navigation = {

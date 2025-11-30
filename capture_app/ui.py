@@ -110,6 +110,7 @@ class PacketCaptureApp:
         self.notification_macro_pos1: Optional[tuple[int, int]] = None
         self.notification_macro_pos2: Optional[tuple[int, int]] = None
         self.notification_macro_pos3: Optional[tuple[int, int]] = None
+        self.notification_macro_pos4: Optional[tuple[int, int]] = None
         self.macro_toggle_button: Optional[ttk.Button] = None
         self.macro_setting_button: Optional[ttk.Button] = None
         self.macro_status_label: Optional[ttk.Label] = None
@@ -2041,6 +2042,10 @@ class PacketCaptureApp:
                 parts.append(f"pos3: {self.notification_macro_pos3}")
             else:
                 parts.append("pos3 미설정")
+            if self.notification_macro_pos4:
+                parts.append(f"pos4: {self.notification_macro_pos4}")
+            else:
+                parts.append("pos4 미설정")
             text = " / ".join(parts)
             self.macro_position_label.config(text=text)
 
@@ -2062,7 +2067,7 @@ class PacketCaptureApp:
     def _start_macro_position_capture(self) -> None:
         self._stop_macro_position_listener()
         self._macro_capture_positions.clear()
-        self._update_macro_status_text("pos1, pos2, pos3 위치를 순서대로 선택하세요.")
+        self._update_macro_status_text("pos1, pos2, pos3, pos4 위치를 순서대로 선택하세요.")
         self._macro_position_listener = mouse.Listener(on_click=self._on_macro_position_click)
         self._macro_position_listener.start()
 
@@ -2076,12 +2081,12 @@ class PacketCaptureApp:
         if not pressed or button != mouse.Button.left:
             return
         self._macro_capture_positions.append((int(x), int(y)))
-        if len(self._macro_capture_positions) < 3:
+        if len(self._macro_capture_positions) < 4:
             next_index = len(self._macro_capture_positions) + 1
             self.master.after(
                 0, lambda: self._update_macro_status_text(f"pos{next_index} 위치를 선택하세요.")
             )
-        if len(self._macro_capture_positions) >= 3:
+        if len(self._macro_capture_positions) >= 4:
             positions = list(self._macro_capture_positions)
             self._macro_capture_positions.clear()
             self.master.after(0, lambda: self._finalize_macro_positions(positions))
@@ -2089,10 +2094,11 @@ class PacketCaptureApp:
             return False
 
     def _finalize_macro_positions(self, positions: list[tuple[int, int]]) -> None:
-        if len(positions) >= 3:
+        if len(positions) >= 4:
             self.notification_macro_pos1 = positions[0]
             self.notification_macro_pos2 = positions[1]
             self.notification_macro_pos3 = positions[2]
+            self.notification_macro_pos4 = positions[3]
             self._update_macro_status_text("좌표 설정 완료")
         else:
             self._update_macro_status_text("좌표 설정 실패")
@@ -2101,8 +2107,13 @@ class PacketCaptureApp:
     def _trigger_notification_macro(self) -> None:
         if not self.notification_macro_enabled:
             return
-        if not (self.notification_macro_pos1 and self.notification_macro_pos2 and self.notification_macro_pos3):
-            self._update_macro_status_text("pos1~3 설정 필요")
+        if not (
+            self.notification_macro_pos1
+            and self.notification_macro_pos2
+            and self.notification_macro_pos3
+            and self.notification_macro_pos4
+        ):
+            self._update_macro_status_text("pos1~4 설정 필요")
             return
 
         self._ensure_macro_thread()
@@ -2111,8 +2122,13 @@ class PacketCaptureApp:
     def _ensure_macro_thread(self) -> None:
         if self.notification_macro_running and self._macro_thread and self._macro_thread.is_alive():
             return
-        if not (self.notification_macro_pos1 and self.notification_macro_pos2 and self.notification_macro_pos3):
-            self._update_macro_status_text("pos1~3 설정 필요")
+        if not (
+            self.notification_macro_pos1
+            and self.notification_macro_pos2
+            and self.notification_macro_pos3
+            and self.notification_macro_pos4
+        ):
+            self._update_macro_status_text("pos1~4 설정 필요")
             return
 
         self.notification_macro_running = True
@@ -2137,6 +2153,7 @@ class PacketCaptureApp:
                     self.notification_macro_pos1
                     and self.notification_macro_pos2
                     and self.notification_macro_pos3
+                    and self.notification_macro_pos4
                 ):
                     self.master.after(0, lambda: self._update_macro_status_text("좌표 설정 필요"))
                     break
@@ -2145,11 +2162,11 @@ class PacketCaptureApp:
                     break
 
                 if self._macro_waiting_for_second_log:
-                    self._perform_clicks(self.notification_macro_pos3, count=50, interval=0.05)
+                    self._perform_clicks(self.notification_macro_pos2, count=50, interval=0.05)
                     self.master.after(
                         0,
                         lambda: self._append_notification_message(
-                            time.time(), "추가 로그 감지 - pos3 클릭 후 종료", trigger_macro=False
+                            time.time(), "추가 로그 감지 - pos2 클릭 후 종료", trigger_macro=False
                         ),
                     )
                     self.notification_macro_enabled = False
@@ -2167,8 +2184,10 @@ class PacketCaptureApp:
 
                 if similarity is not None and similarity >= 0.9999:
                     time.sleep(1)
-                    self._perform_clicks(self.notification_macro_pos2, count=1, interval=0.0)
-                    time.sleep(0.5)
+                    self._perform_clicks(self.notification_macro_pos3, count=1, interval=0.0)
+                    time.sleep(0.25)
+                    self._perform_clicks(self.notification_macro_pos4, count=1, interval=0.0)
+                    time.sleep(0.25)
                     pyautogui.press("enter")
                     continue
 
@@ -2421,6 +2440,9 @@ class PacketCaptureApp:
             "macro_pos3": list(self.notification_macro_pos3)
             if self.notification_macro_pos3
             else None,
+            "macro_pos4": list(self.notification_macro_pos4)
+            if self.notification_macro_pos4
+            else None,
         }
         try:
             with self.settings_path.open("w", encoding="utf-8") as fp:
@@ -2480,6 +2502,14 @@ class PacketCaptureApp:
             and all(isinstance(item, (int, float)) for item in macro_pos3_value)
         ):
             self.notification_macro_pos3 = (int(macro_pos3_value[0]), int(macro_pos3_value[1]))
+
+        macro_pos4_value = data.get("macro_pos4")
+        if (
+            isinstance(macro_pos4_value, list)
+            and len(macro_pos4_value) == 2
+            and all(isinstance(item, (int, float)) for item in macro_pos4_value)
+        ):
+            self.notification_macro_pos4 = (int(macro_pos4_value[0]), int(macro_pos4_value[1]))
 
         self._refresh_macro_ui()
 

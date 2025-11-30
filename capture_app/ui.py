@@ -123,6 +123,7 @@ class PacketCaptureApp:
         self._macro_position_listener: Optional[mouse.Listener] = None
         self._macro_capture_positions: list[tuple[int, int]] = []
         self._macro_waiting_for_second_log = False
+        self._macro_settings_window: Optional[tk.Toplevel] = None
 
         self.alpha3_filter_var = tk.BooleanVar(value=False)
 
@@ -1944,7 +1945,7 @@ class PacketCaptureApp:
         frame = ttk.Frame(self.notification_window, padding=8)
         frame.grid(row=0, column=0, sticky="nsew")
         frame.columnconfigure(0, weight=1)
-        frame.columnconfigure(2, weight=0)
+        frame.columnconfigure(2, weight=0, minsize=120)
         frame.rowconfigure(1, weight=1)
 
         control_frame = ttk.Frame(frame)
@@ -1957,7 +1958,7 @@ class PacketCaptureApp:
         self.macro_toggle_button.grid(row=0, column=0, padx=(0, 4))
 
         self.macro_setting_button = ttk.Button(
-            control_frame, text="설정", command=self._start_macro_position_capture
+            control_frame, text="설정", command=self._open_macro_settings_dialog
         )
         self.macro_setting_button.grid(row=0, column=1, padx=(0, 8))
 
@@ -1976,8 +1977,10 @@ class PacketCaptureApp:
         image_frame = ttk.Frame(frame)
         image_frame.grid(row=1, column=2, sticky="n")
         ttk.Label(image_frame, text="캡쳐 미리보기").grid(row=0, column=0, pady=(0, 4))
-        self.notification_image_label = ttk.Label(image_frame, text="이미지 없음", relief=tk.SOLID)
-        self.notification_image_label.grid(row=1, column=0, padx=(8, 0))
+        self.notification_image_label = ttk.Label(
+            image_frame, text="이미지 없음", relief=tk.SOLID, width=12, anchor="center"
+        )
+        self.notification_image_label.grid(row=1, column=0, padx=(8, 0), pady=(0, 4))
 
         self._refresh_notification_overlay()
         self._refresh_macro_ui()
@@ -1988,6 +1991,9 @@ class PacketCaptureApp:
         self.notification_window = None
         self.notification_text = None
         self._stop_macro_position_listener()
+        if getattr(self, "_macro_settings_window", None) and self._macro_settings_window.winfo_exists():
+            self._macro_settings_window.destroy()
+            self._macro_settings_window = None
 
     def _refresh_notification_overlay(self) -> None:
         if not self.notification_text or not self.notification_text.winfo_exists():
@@ -2071,6 +2077,78 @@ class PacketCaptureApp:
         self._macro_position_listener = mouse.Listener(on_click=self._on_macro_position_click)
         self._macro_position_listener.start()
 
+    def _open_macro_settings_dialog(self) -> None:
+        if getattr(self, "_macro_settings_window", None) and self._macro_settings_window.winfo_exists():
+            self._macro_settings_window.lift()
+            return
+
+        self._macro_settings_window = tk.Toplevel(self.notification_window or self.master)
+        self._macro_settings_window.title("매크로 좌표 설정")
+        self._macro_settings_window.attributes("-topmost", True)
+
+        def close_dialog() -> None:
+            if getattr(self, "_macro_settings_window", None):
+                self._macro_settings_window.destroy()
+                self._macro_settings_window = None
+
+        self._macro_settings_window.protocol("WM_DELETE_WINDOW", close_dialog)
+
+        ttk.Label(self._macro_settings_window, text="각 pos 좌표를 입력하거나 마우스로 설정하세요.").grid(
+            row=0, column=0, columnspan=4, sticky="w", padx=8, pady=(8, 4)
+        )
+
+        entries: list[tuple[tk.Entry, tk.Entry, str]] = []
+
+        def create_row(row: int, name: str, value: Optional[tuple[int, int]]) -> None:
+            ttk.Label(self._macro_settings_window, text=name).grid(row=row, column=0, sticky="e", padx=(8, 4))
+            x_var = tk.StringVar(value=str(value[0]) if value else "")
+            y_var = tk.StringVar(value=str(value[1]) if value else "")
+            x_entry = ttk.Entry(self._macro_settings_window, width=8, textvariable=x_var)
+            y_entry = ttk.Entry(self._macro_settings_window, width=8, textvariable=y_var)
+            x_entry.grid(row=row, column=1, padx=(0, 4), pady=2)
+            y_entry.grid(row=row, column=2, padx=(0, 8), pady=2)
+            entries.append((x_entry, y_entry, name))
+
+        create_row(1, "pos1", self.notification_macro_pos1)
+        create_row(2, "pos2", self.notification_macro_pos2)
+        create_row(3, "pos3", self.notification_macro_pos3)
+        create_row(4, "pos4", self.notification_macro_pos4)
+
+        capture_button = ttk.Button(
+            self._macro_settings_window, text="마우스로 좌표 선택", command=self._start_macro_position_capture
+        )
+        capture_button.grid(row=5, column=0, columnspan=2, padx=8, pady=(6, 8), sticky="w")
+
+        def apply_settings() -> None:
+            try:
+                values: list[Optional[tuple[int, int]]] = []
+                for x_entry, y_entry, name in entries:
+                    x_text = x_entry.get().strip()
+                    y_text = y_entry.get().strip()
+                    if not x_text and not y_text:
+                        values.append(None)
+                        continue
+                    x_val = int(x_text)
+                    y_val = int(y_text)
+                    values.append((x_val, y_val))
+            except ValueError:
+                messagebox.showerror("입력 오류", "좌표는 정수로 입력해주세요.")
+                return
+
+            if len(values) >= 4:
+                self.notification_macro_pos1 = values[0]
+                self.notification_macro_pos2 = values[1]
+                self.notification_macro_pos3 = values[2]
+                self.notification_macro_pos4 = values[3]
+                self._update_macro_status_text("좌표 설정 완료")
+                self._refresh_macro_ui()
+                self._save_settings()
+
+            close_dialog()
+
+        apply_button = ttk.Button(self._macro_settings_window, text="저장", command=apply_settings)
+        apply_button.grid(row=5, column=2, columnspan=2, padx=8, pady=(6, 8), sticky="e")
+
     def _stop_macro_position_listener(self) -> None:
         if self._macro_position_listener:
             self._macro_position_listener.stop()
@@ -2142,8 +2220,28 @@ class PacketCaptureApp:
     def _run_notification_macro(self) -> None:
         try:
             while self.notification_macro_enabled and not self._macro_stop_event.is_set():
-                status_text = "추가 로그 대기 중" if self._macro_waiting_for_second_log else "로그 대기 중"
+                status_text = "추가 로그 대기 중 (pos1 클릭)" if self._macro_waiting_for_second_log else "로그 대기 중"
                 self.master.after(0, lambda text=status_text: self._update_macro_status_text(text))
+
+                if self._macro_waiting_for_second_log:
+                    if not (self.notification_macro_pos1 and self.notification_macro_pos2):
+                        self.master.after(0, lambda: self._update_macro_status_text("좌표 설정 필요"))
+                        break
+
+                    log_detected = self._click_until_next_log(self.notification_macro_pos1)
+                    if not log_detected:
+                        continue
+
+                    self._perform_clicks(self.notification_macro_pos2, count=20, interval=0.05)
+                    self.master.after(
+                        0,
+                        lambda: self._append_notification_message(
+                            time.time(), "추가 로그 감지 - pos2 클릭 후 종료", trigger_macro=False
+                        ),
+                    )
+                    self.notification_macro_enabled = False
+                    self._macro_stop_event.set()
+                    break
 
                 self._macro_log_event.wait(timeout=0.1)
                 if not self._macro_log_event.is_set():
@@ -2161,18 +2259,6 @@ class PacketCaptureApp:
                 if self._macro_stop_event.is_set():
                     break
 
-                if self._macro_waiting_for_second_log:
-                    self._perform_clicks(self.notification_macro_pos2, count=50, interval=0.05)
-                    self.master.after(
-                        0,
-                        lambda: self._append_notification_message(
-                            time.time(), "추가 로그 감지 - pos2 클릭 후 종료", trigger_macro=False
-                        ),
-                    )
-                    self.notification_macro_enabled = False
-                    self._macro_stop_event.set()
-                    break
-
                 similarity = self._capture_macro_image(self.notification_macro_pos1)
                 if similarity is not None:
                     self.master.after(
@@ -2182,7 +2268,7 @@ class PacketCaptureApp:
                         ),
                     )
 
-                if similarity is not None and similarity >= 0.9999:
+                if similarity is not None and similarity >= 0.999999:
                     time.sleep(1)
                     self._perform_clicks(self.notification_macro_pos3, count=1, interval=0.0)
                     time.sleep(0.25)
@@ -2191,12 +2277,19 @@ class PacketCaptureApp:
                     pyautogui.press("enter")
                     continue
 
-                self._perform_clicks(self.notification_macro_pos1, count=5, interval=0.05)
                 self._macro_waiting_for_second_log = True
         finally:
             self.notification_macro_running = False
             self._macro_waiting_for_second_log = False
             self.master.after(0, self._refresh_macro_ui)
+
+    def _click_until_next_log(self, position: tuple[int, int]) -> bool:
+        while self.notification_macro_enabled and not self._macro_stop_event.is_set():
+            if self._macro_log_event.wait(timeout=0.05):
+                self._macro_log_event.clear()
+                return True
+            pyautogui.click(position[0], position[1])
+        return False
 
     def _stop_macro_execution(self) -> None:
         self._macro_stop_event.set()

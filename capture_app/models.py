@@ -19,6 +19,7 @@ class PacketDisplay:
     preview: str = ""
     direction: str = "unknown"
     captured_at: float = 0.0
+    raw_packet: Optional[object] = None
 
 
 @dataclass

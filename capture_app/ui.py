@@ -22,7 +22,7 @@ from pynput import keyboard, mouse
 from PIL import Image, ImageChops, ImageStat, ImageTk
 
 try:
-    from scapy.all import AsyncSniffer, IP, IPv6, Raw, TCP, UDP  # type: ignore
+    from scapy.all import AsyncSniffer, Ether, IP, IPv6, Raw, TCP, UDP, send, sendp  # type: ignore
 except ImportError as exc:  # pragma: no cover - scapy 미설치 환경 대비
     raise SystemExit(
         "Scapy가 설치되어 있지 않습니다. 'pip install scapy' 명령으로 설치 후 다시 실행하세요."
@@ -129,6 +129,7 @@ class PacketCaptureApp:
         self._macro_settings_window: Optional[tk.Toplevel] = None
 
         self.alpha3_filter_var = tk.BooleanVar(value=False)
+        self.packet_tree_menu: Optional[tk.Menu] = None
 
         self._build_widgets()
         self._load_settings()
@@ -275,6 +276,12 @@ class PacketCaptureApp:
         self.packet_tree.column("preview", anchor="w", width=200, stretch=False)
         self.packet_tree.grid(row=0, column=0, sticky="nsew")
         self.packet_tree.bind("<<TreeviewSelect>>", self._on_select_packet)
+        self.packet_tree.bind("<Button-3>", self._on_packet_tree_right_click)
+
+        self.packet_tree_menu = tk.Menu(self.packet_tree, tearoff=0)
+        self.packet_tree_menu.add_command(
+            label="다시 보내기", command=self._on_resend_selected_packet, state=tk.DISABLED
+        )
 
         scrollbar = ttk.Scrollbar(packet_frame, orient=tk.VERTICAL, command=self.packet_tree.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
@@ -538,6 +545,7 @@ class PacketCaptureApp:
                     preview=preview,
                     direction=direction,
                     captured_at=time.time(),
+                    raw_packet=packet.copy(),
                 )
             )
 
@@ -598,6 +606,72 @@ class PacketCaptureApp:
 
     def _on_select_packet(self, _: tk.Event) -> None:
         self._refresh_detail_view()
+
+    def _find_packet_by_identifier(self, identifier: str) -> Optional[PacketDisplay]:
+        return next((pkt for pkt in self.packet_list_data if str(pkt.identifier) == identifier), None)
+
+    def _on_packet_tree_right_click(self, event: tk.Event) -> None:
+        if not self.packet_tree_menu:
+            return
+        row_id = self.packet_tree.identify_row(event.y)
+        if not row_id:
+            return
+        self.packet_tree.selection_set(row_id)
+        packet_item = self._find_packet_by_identifier(row_id)
+        can_resend = (
+            packet_item is not None
+            and packet_item.direction == "outgoing"
+            and packet_item.raw_packet is not None
+        )
+        state = tk.NORMAL if can_resend else tk.DISABLED
+        self.packet_tree_menu.entryconfigure("다시 보내기", state=state)
+        try:
+            self.packet_tree_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.packet_tree_menu.grab_release()
+
+    def _on_resend_selected_packet(self) -> None:
+        selection = self.packet_tree.selection()
+        if not selection:
+            messagebox.showinfo("알림", "먼저 다시 보낼 송신 패킷을 선택하세요.")
+            return
+
+        selected_id = selection[0]
+        item = self._find_packet_by_identifier(selected_id)
+        if item is None:
+            messagebox.showerror("오류", "선택한 패킷 정보를 찾을 수 없습니다.")
+            return
+        if item.direction != "outgoing":
+            messagebox.showinfo("알림", "송신 패킷만 다시 보낼 수 있습니다.")
+            return
+        if item.raw_packet is None:
+            messagebox.showerror("오류", "원본 패킷 데이터가 없어 다시 보낼 수 없습니다.")
+            return
+
+        self._send_packet_again(item.raw_packet)
+
+    def _send_packet_again(self, packet) -> None:
+        if packet is None:
+            messagebox.showerror("오류", "원본 패킷 데이터가 없어 다시 보낼 수 없습니다.")
+            return
+
+        try:
+            packet_to_send = packet.copy()
+        except Exception:
+            packet_to_send = packet
+
+        try:
+            use_layer2 = hasattr(packet_to_send, "haslayer") and packet_to_send.haslayer(Ether)
+            if use_layer2:
+                sendp(packet_to_send, verbose=False)
+            else:
+                send(packet_to_send, verbose=False)
+        except PermissionError:
+            messagebox.showerror("오류", "패킷을 송신하려면 관리자 권한이 필요합니다.")
+        except Exception as exc:
+            messagebox.showerror("오류", f"패킷 다시 보내기에 실패했습니다: {exc}")
+        else:
+            messagebox.showinfo("완료", "패킷을 다시 보냈습니다.")
 
     # ------------------------------------------------------------------
     # PPSN 찾기 기능
@@ -2620,4 +2694,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -1,0 +1,5 @@
+.env
+__pycache__/
+*.pyc
+temp1.png
+temp2.png

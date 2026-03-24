@@ -21,8 +21,8 @@ DEFAULT_REQUEST_HEADERS = {
     "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
     "Connection": "keep-alive",
 }
-FRIEND_CODE_PATTERN = re.compile(r"^/profile/([A-Za-z0-9]{5})$")
-FRIEND_CODE_IN_TEXT_PATTERN = re.compile(r"/profile/([A-Za-z0-9]{5})")
+FRIEND_CODE_PATTERN = re.compile(r"^/profile/([A-Za-z0-9]{5,6})$")
+FRIEND_CODE_IN_TEXT_PATTERN = re.compile(r"/profile/([A-Za-z0-9]{5,6})")
 VALUE_PREFIX_PATTERN = r"[\s:=\"'\x00-\x1F]*"
 WORLD_ID_PATTERN = re.compile(
     rf"w\s*o\s*r\s*l\s*d\s*i\s*d{VALUE_PREFIX_PATTERN}(\d{{17}})",

@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>무기</title>
+  <link rel="stylesheet" href="/css/style.css?v=15">
+</head>
+<body>
+  <div id="app">
+    <!-- 필터 패널 -->
+    <fieldset id="filter-panel">
+      <legend>필터</legend>
+      <div class="filter-grid">
+        <label>대상 IP/네트워크</label>
+        <input type="text" id="filter-ip" placeholder="예: 192.168.0.10 또는 2001:db8::/64">
+
+        <label>포트</label>
+        <input type="text" id="filter-port" placeholder="비우면 모든 포트">
+
+        <label>텍스트 포함</label>
+        <input type="text" id="filter-text" placeholder="UTF-8 텍스트 기준 검색">
+
+        <label>표시 최대 패킷 수</label>
+        <input type="number" id="filter-max" value="500" min="1">
+
+        <label>패킷 방향</label>
+        <select id="filter-direction">
+          <option value="all">전체</option>
+          <option value="incoming">수신</option>
+          <option value="outgoing">송신</option>
+          <option value="unknown">미확인</option>
+        </select>
+      </div>
+    </fieldset>
+
+    <!-- 제어 버튼 -->
+    <div id="control-bar">
+      <button id="btn-start" onclick="App.startCapture()">캡쳐 시작</button>
+      <button id="btn-stop" onclick="App.stopCapture()" disabled>캡쳐 중지</button>
+      <button id="btn-packet" onclick="App.togglePacketModal()">패킷 읽기</button>
+      <button id="btn-ppsn" onclick="App.togglePpsn()">PPSN 찾기</button>
+      <button id="btn-world" onclick="App.toggleWorld()">월드 매칭</button>
+      <button id="btn-friend" onclick="App.toggleFriend()">친구검색</button>
+      <button id="btn-userlist" onclick="UserList.open()">유저리스트</button>
+    </div>
+
+    <!-- 메인 영역 -->
+    <div id="main-area">
+      <!-- 유저 DB -->
+      <div id="userdb-section">
+        <div id="userdb-header">
+          <span>유저 DB (<span id="userdb-count">0</span>명)</span>
+          <button onclick="UserDB.clearAll()" style="margin-left:auto">초기화</button>
+        </div>
+        <div id="userdb-table-wrap">
+          <table id="userdb-table">
+            <thead>
+              <tr>
+                <th>프로필 코드</th>
+                <th>인겜닉</th>
+                <th>메월닉</th>
+                <th>길드</th>
+                <th>주 사냥터</th>
+                <th>PPSN</th>
+              </tr>
+            </thead>
+            <tbody id="userdb-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- 월드 매칭 패널 (토글) -->
+      <div id="world-panel" class="side-panel hidden">
+        <h3>월드 매칭</h3>
+        <div id="world-order">
+          <span>매칭 순서:</span>
+          <label><input type="checkbox" id="world-order-wf" onchange="World.toggleOrder('world-first')"> 월드ID → 채널</label>
+          <label><input type="checkbox" id="world-order-cf" onchange="World.toggleOrder('channel-first')"> 채널 → 월드ID</label>
+        </div>
+        <div id="world-table-wrap">
+          <table id="world-table">
+            <thead>
+              <tr>
+                <th>채널명</th>
+                <th>채널 코드</th>
+              </tr>
+            </thead>
+            <tbody id="world-tbody"></tbody>
+          </table>
+        </div>
+        <div class="panel-actions">
+          <button onclick="World.save()">저장</button>
+          <button onclick="World.clear()">삭제</button>
+          <button onclick="World.openExperiment()">실험</button>
+        </div>
+      </div>
+
+      <!-- 실험 모달 -->
+      <div id="experiment-modal" class="modal hidden">
+        <div class="modal-content experiment-modal-content">
+          <div class="modal-header">
+            <h3>실험</h3>
+            <button class="close-btn" onclick="World.closeExperiment()">&times;</button>
+          </div>
+          <div class="experiment-tabs">
+            <button id="exp-tab-world" class="exp-tab active" onclick="World.switchExpTab('world')">월드매칭</button>
+            <button id="exp-tab-channel" class="exp-tab" onclick="World.switchExpTab('channel')">채널매칭</button>
+          </div>
+          <div id="exp-world-view" class="exp-view">
+            <div id="experiment-table-wrap">
+              <table id="experiment-table">
+                <thead>
+                  <tr>
+                    <th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th>
+                  </tr>
+                </thead>
+                <tbody id="experiment-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+          <div id="exp-channel-view" class="exp-view hidden">
+            <div id="experiment-ch-table-wrap">
+              <table id="experiment-ch-table">
+                <thead>
+                  <tr>
+                    <th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th>
+                  </tr>
+                </thead>
+                <tbody id="experiment-ch-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="panel-actions">
+            <button onclick="World.clearExperiment()">초기화</button>
+            <button onclick="World.saveExpToWorldMatch()">월드 매칭 데이터로 저장</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 친구 검색 패널 (토글) -->
+      <div id="friend-panel" class="side-panel hidden">
+        <h3>친구 검색</h3>
+        <div class="friend-input">
+          <label>프로필 코드 (5~6글자)</label>
+          <input type="text" id="friend-code" maxlength="6">
+          <button id="friend-search-btn" onclick="Friends.search()">검색</button>
+          <button id="friend-stop-btn" onclick="Friends.stop()" disabled>중지</button>
+        </div>
+        <div id="friend-status">프로필 코드를 입력하고 검색을 시작하세요.</div>
+        <div id="friend-count">탐색한 친구 수: <span id="friend-count-val">0</span></div>
+        <div id="friend-table-wrap">
+          <table id="friend-table">
+            <thead>
+              <tr>
+                <th>상태</th>
+                <th>프로필 코드</th>
+                <th>채널명</th>
+                <th>메월닉</th>
+                <th>월드명</th>
+                <th>채널 코드</th>
+                <th>PPSN</th>
+              </tr>
+            </thead>
+            <tbody id="friend-tbody"></tbody>
+          </table>
+        </div>
+        <div class="panel-actions">
+          <button onclick="Friends.saveToUserDB()">유저 DB에 저장</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 패킷 모달 -->
+    <div id="packet-modal" class="modal hidden">
+      <div class="modal-content packet-modal-content">
+        <div class="modal-header">
+          <h3>패킷 데이터</h3>
+          <button class="close-btn" onclick="App.togglePacketModal()">&times;</button>
+        </div>
+        <div id="packet-controls">
+          <button onclick="Packets.exportAll()">TXT로 내보내기</button>
+          <label><input type="checkbox" id="auto-scroll" checked> 자동 스크롤</label>
+        </div>
+        <pre id="packet-output">캡쳐를 시작하면 패킷이 여기에 표시됩니다.</pre>
+      </div>
+    </div>
+
+    <!-- 유저리스트 모달 -->
+    <div id="userlist-modal" class="modal hidden">
+      <div class="modal-content userlist-modal-content">
+        <div class="modal-header">
+          <h3>유저리스트</h3>
+          <button class="close-btn" onclick="UserList.close()">&times;</button>
+        </div>
+        <div id="userlist-info">감지된 유저: <span id="userlist-count">0</span>명</div>
+        <div id="userlist-table-wrap">
+          <table id="userlist-table">
+            <thead>
+              <tr>
+                <th>닉네임</th>
+                <th>맵</th>
+                <th>프로필 코드</th>
+              </tr>
+            </thead>
+            <tbody id="userlist-tbody"></tbody>
+          </table>
+        </div>
+        <div class="panel-actions">
+          <button onclick="UserList.clear()">초기화</button>
+          <button onclick="UserList.saveToUserDB()">유저 DB에 저장</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- PPSN 모달 -->
+    <div id="ppsn-modal" class="modal hidden">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>PPSN 찾기</h3>
+          <button class="close-btn" onclick="App.togglePpsn()">&times;</button>
+        </div>
+        <div class="ppsn-form">
+          <label>프로필 코드 (5~6글자)</label>
+          <input type="text" id="ppsn-code" maxlength="6">
+          <label>요청 간 대기 (초)</label>
+          <input type="number" id="ppsn-delay" value="0.5" step="0.1" min="0">
+          <button id="ppsn-search-btn" onclick="PPSN.search()">PPSN 검색</button>
+        </div>
+        <div class="ppsn-form" style="margin-top:8px">
+          <label>월드 코드 (17자리)</label>
+          <input type="text" id="ppsn-world-code" maxlength="17">
+          <button id="channel-search-btn" onclick="PPSN.channelSearch()">채널검색</button>
+        </div>
+        <div id="ppsn-log-label">검색 로그</div>
+        <pre id="ppsn-log"></pre>
+        <div class="ppsn-result-row">
+          <label>결과 PPSN</label>
+          <input type="text" id="ppsn-result" readonly>
+          <button onclick="PPSN.copyResult()">복사</button>
+        </div>
+        <div class="ppsn-result-row">
+          <label>채널 검색 결과</label>
+          <input type="text" id="channel-result" readonly>
+        </div>
+        <div class="ppsn-result-row">
+          <label>탐색한 온라인 친구 수</label>
+          <input type="text" id="channel-count" value="0" readonly>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/js/ws.js?v=15"></script>
+  <script src="/js/packets.js?v=15"></script>
+  <script src="/js/friends.js?v=15"></script>
+  <script src="/js/world.js?v=15"></script>
+  <script src="/js/userlist.js?v=15"></script>
+  <script src="/js/userdb.js?v=15"></script>
+  <script src="/js/app.js?v=15"></script>
+</body>
+</html>

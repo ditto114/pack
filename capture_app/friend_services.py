@@ -40,7 +40,7 @@ def get_initial_friends(target_code: str) -> list[str]:
     codes = extract_friend_codes_from_profile(html)
     if not codes:
         raise RuntimeError(
-            "프로필 페이지에서 친구 목록을 찾지 못했습니다. 친구 코드가 올바른지 확인하세요."
+            "프로필 페이지에서 친구 목록을 찾지 못했습니다. 프로필 코드가 올바른지 확인하세요."
         )
     return codes
 
@@ -184,7 +184,7 @@ def find_friend_by_world_code(
     logger: Optional[Callable[[str], None]] = None,
     progress_callback: Optional[Callable[[int], None]] = None,
 ) -> Optional[tuple[str, str, str]]:
-    """지정한 친구 코드의 친구 목록에서 월드 코드를 탐색한다."""
+    """지정한 프로필 코드의 친구 목록에서 월드 코드를 탐색한다."""
 
     log = logger or (lambda message: None)
 
@@ -215,7 +215,7 @@ def find_friend_by_world_code(
                 html = fetch_html(url, referer=referer)
             except HTTPError as exc:
                 if exc.code == 404:
-                    log("[경고] 친구 목록 페이지를 찾을 수 없습니다. 입력한 친구 코드를 확인하세요.")
+                    log("[경고] 친구 목록 페이지를 찾을 수 없습니다. 입력한 프로필 코드를 확인하세요.")
                     enqueue_fallback = True
                     break
                 raise
@@ -224,7 +224,7 @@ def find_friend_by_world_code(
             if fallback_friend_code is None and page_data.first_friend_code:
                 fallback_friend_code = page_data.first_friend_code
                 log(
-                    f"[정보] 첫 번째 친구 코드 {fallback_friend_code} 를 다음 탐색 후보로 기록합니다."
+                    f"[정보] 첫 번째 프로필 코드 {fallback_friend_code} 를 다음 탐색 후보로 기록합니다."
                 )
 
             online_entries = [entry for entry in page_data.entries if entry.is_online]
@@ -272,6 +272,6 @@ def find_friend_by_world_code(
                     f"[정보] 친구 {fallback_friend_code} 는 이미 탐색 대상에 포함되어 있습니다."
                 )
         elif enqueue_fallback and not fallback_friend_code:
-            log("[경고] 이어서 탐색할 친구 코드를 찾지 못했습니다.")
+            log("[경고] 이어서 탐색할 프로필 코드를 찾지 못했습니다.")
 
     return None

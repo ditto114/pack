@@ -1,0 +1,454 @@
+/* ── 기본 리셋 & 변수 ─────────────────────────────────────────── */
+:root {
+  --bg: #0d0d0d;
+  --surface: #1a1a1a;
+  --surface2: #2a2a2a;
+  --accent: #cccccc;
+  --accent2: #3d3d3d;
+  --text: #e8e8e8;
+  --text-dim: #888;
+  --border: #333;
+  --success: #4ade80;
+  --error: #f87171;
+  --radius: 6px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Gulim', '굴림', sans-serif; }
+
+body {
+  font-family: 'Gulim', '굴림', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  overflow: hidden;
+  height: 100vh;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  padding: 8px;
+  gap: 8px;
+}
+
+/* ── 필터 패널 ────────────────────────────────────────────────── */
+fieldset {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+}
+legend {
+  color: var(--accent);
+  font-weight: 600;
+  padding: 0 6px;
+}
+.filter-grid {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: 4px 8px;
+  align-items: center;
+}
+.filter-grid label {
+  color: var(--text-dim);
+  text-align: right;
+}
+input, select {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 13px;
+}
+input:focus, select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* ── 버튼 ─────────────────────────────────────────────────────── */
+button {
+  background: var(--surface2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 5px 14px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 0.15s;
+}
+button:hover:not(:disabled) { background: var(--accent2); }
+button:disabled { opacity: 0.4; cursor: default; }
+button.primary {
+  background: #555;
+  border-color: #777;
+}
+button.primary:hover:not(:disabled) {
+  background: #777;
+}
+
+#control-bar {
+  display: flex;
+  gap: 6px;
+}
+#control-bar button { flex: 1; }
+
+/* ── 메인 영역 ────────────────────────────────────────────────── */
+#main-area {
+  flex: 1;
+  display: flex;
+  gap: 8px;
+  min-height: 0;
+}
+
+/* ── 유저 DB 섹션 (메인 영역) ──────────────────────────────────── */
+#userdb-section {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+#userdb-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+#userdb-header span { font-weight: 600; }
+#userdb-table-wrap {
+  flex: 1;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+#userdb-table th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+#userdb-table th.sortable:hover {
+  color: var(--accent);
+}
+#userdb-table td {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+.userdb-edit-input {
+  width: 100%;
+  padding: 2px 4px;
+  font-size: 12px;
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  color: var(--text);
+  border-radius: 3px;
+}
+
+/* ── 패킷 모달 ────────────────────────────────────────────────── */
+.packet-modal-content {
+  width: 900px;
+  max-height: 85vh;
+}
+#packet-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+#packet-controls label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+}
+#packet-output {
+  flex: 1;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  padding: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text);
+  max-height: 65vh;
+  min-height: 200px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+thead {
+  position: sticky;
+  top: 0;
+  background: var(--surface2);
+  z-index: 1;
+}
+th {
+  padding: 6px 8px;
+  text-align: left;
+  border-bottom: 2px solid var(--border);
+  color: var(--text-dim);
+  font-weight: 600;
+  white-space: nowrap;
+}
+td {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 300px;
+}
+tr { cursor: pointer; }
+tr:hover { background: var(--surface2); }
+tr.selected { background: var(--accent2) !important; }
+
+.col-time { width: 70px; }
+.col-dir { width: 60px; text-align: center; }
+.col-preview { width: 150px; }
+
+/* ── (패킷 상세 — removed, now using #packet-output) ────────── */
+
+/* ── 사이드 패널 ──────────────────────────────────────────────── */
+.side-panel {
+  width: 340px;
+  min-width: 280px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: auto;
+  background: var(--surface);
+}
+.side-panel h3 {
+  color: var(--accent);
+  font-size: 14px;
+}
+.side-panel.hidden { display: none; }
+
+.panel-actions {
+  display: flex;
+  gap: 6px;
+}
+
+/* 월드 매칭 */
+#world-order {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+#world-order label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+#world-table-wrap { flex: 1; overflow: auto; }
+
+/* 친구 검색 */
+.friend-input {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.friend-input input { width: 80px; }
+#friend-status {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+#friend-count {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+#friend-table-wrap { flex: 1; overflow: auto; }
+
+/* ── PPSN 모달 ────────────────────────────────────────────────── */
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.modal.hidden { display: none; }
+.modal-content {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  width: 560px;
+  max-height: 80vh;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.modal-header h3 { color: var(--accent); }
+.close-btn {
+  background: none;
+  border: none;
+  color: var(--text);
+  font-size: 20px;
+  cursor: pointer;
+}
+.ppsn-form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.ppsn-form label { color: var(--text-dim); white-space: nowrap; }
+.ppsn-form input { flex: 1; min-width: 80px; }
+#ppsn-log {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px;
+  height: 160px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+.ppsn-result-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ppsn-result-row label { color: var(--text-dim); white-space: nowrap; min-width: 130px; }
+.ppsn-result-row input { flex: 1; }
+
+/* ── 방향 태그 ────────────────────────────────────────────────── */
+.dir-in { color: var(--success); }
+.dir-out { color: #aaa; }
+.dir-unknown { color: var(--text-dim); }
+
+/* 컨텍스트 메뉴 */
+.context-menu {
+  position: fixed;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  z-index: 200;
+  padding: 4px 0;
+  min-width: 120px;
+}
+.context-menu div {
+  padding: 6px 14px;
+  cursor: pointer;
+}
+.context-menu div:hover { background: var(--accent2); }
+.context-menu div.disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ── 실험 모달 ────────────────────────────────────────────────── */
+.experiment-modal-content {
+  width: 720px;
+  max-height: 80vh;
+}
+.experiment-tabs {
+  display: flex;
+  gap: 4px;
+}
+.exp-tab {
+  flex: 1;
+  padding: 6px 0;
+  text-align: center;
+  border-bottom: 2px solid transparent;
+}
+.exp-tab.active {
+  background: var(--surface2);
+  border-bottom-color: var(--accent);
+  color: var(--accent);
+}
+.exp-view.hidden { display: none; }
+#experiment-table-wrap,
+#experiment-ch-table-wrap {
+  flex: 1;
+  overflow: auto;
+  max-height: 55vh;
+}
+#experiment-table th,
+#experiment-ch-table th {
+  text-align: center;
+  width: calc(100% / 6);
+}
+#experiment-table td,
+#experiment-ch-table td {
+  text-align: center;
+  font-family: 'Gulim', '굴림', 'Consolas', 'Courier New', monospace;
+  font-size: 11px;
+  white-space: nowrap;
+  max-width: none;
+  padding: 4px 6px;
+}
+#experiment-ch-table td[draggable="true"] {
+  cursor: grab;
+}
+#experiment-ch-table td[draggable="true"]:active {
+  cursor: grabbing;
+}
+#experiment-ch-table td.dragging {
+  opacity: 0.4;
+}
+#experiment-ch-table td.drag-over {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background: var(--accent2);
+}
+
+/* ── 유저리스트 모달 ──────────────────────────────────────────── */
+.userlist-modal-content {
+  width: 600px;
+  max-height: 80vh;
+}
+#userlist-info {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+#userlist-table-wrap {
+  flex: 1;
+  overflow: auto;
+  max-height: 60vh;
+}
+#userlist-table th:nth-child(1) { width: 35%; }
+#userlist-table th:nth-child(2) { width: 40%; }
+#userlist-table th:nth-child(3) { width: 25%; }
+#userlist-table th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+#userlist-table th.sortable:hover {
+  color: var(--accent);
+}
+#userlist-table td {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+
+/* 스크롤바 */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--accent2); }

@@ -1,0 +1,11 @@
+{
+  "ip": "",
+  "port": "32800",
+  "text_filter": "",
+  "max_packets": "500",
+  "alpha3_filter": false,
+  "macro_pos1": null,
+  "macro_pos2": null,
+  "macro_pos3": null,
+  "macro_pos4": null
+}

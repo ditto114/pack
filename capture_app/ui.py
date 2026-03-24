@@ -87,7 +87,7 @@ class PacketCaptureApp:
         self.friend_panel: Optional[ttk.LabelFrame] = None
         self.friend_tree: Optional[ttk.Treeview] = None
         self.friend_code_var = tk.StringVar()
-        self.friend_status_var = tk.StringVar(value="친구 코드를 입력하고 검색을 시작하세요.")
+        self.friend_status_var = tk.StringVar(value="프로필 코드를 입력하고 검색을 시작하세요.")
         self.friend_count_var = tk.StringVar(value="0")
         self.friend_toggle_button: Optional[ttk.Button] = None
         self.friend_code_entry: Optional[ttk.Entry] = None
@@ -410,7 +410,7 @@ class PacketCaptureApp:
         friend_input.grid(row=0, column=0, sticky="ew")
         friend_input.columnconfigure(1, weight=1)
 
-        ttk.Label(friend_input, text="친구 코드 (5글자)").grid(
+        ttk.Label(friend_input, text="프로필 코드 (5~6글자)").grid(
             row=0, column=0, padx=(0, 8), pady=(0, 4), sticky="w"
         )
         self.friend_code_entry = ttk.Entry(friend_input, textvariable=self.friend_code_var, width=12)
@@ -430,7 +430,7 @@ class PacketCaptureApp:
         self.friend_stop_button.grid(row=0, column=3, padx=(8, 0), pady=(0, 4))
 
         # 상태 및 결과 표시
-        self.friend_status_var.set("친구 코드를 입력하고 검색을 시작하세요.")
+        self.friend_status_var.set("프로필 코드를 입력하고 검색을 시작하세요.")
         friend_status_label = ttk.Label(
             self.friend_panel,
             textvariable=self.friend_status_var,
@@ -455,8 +455,8 @@ class PacketCaptureApp:
             height=18,
         )
         self.friend_tree.heading("status", text="상태")
-        self.friend_tree.heading("ppsn", text="친구 코드 (PPSN)")
-        self.friend_tree.heading("profile", text="친구 코드 (프로필)")
+        self.friend_tree.heading("ppsn", text="PPSN 코드")
+        self.friend_tree.heading("profile", text="프로필 코드")
         self.friend_tree.heading("name", text="친구 이름")
         self.friend_tree.heading("world", text="월드 이름")
         self.friend_tree.heading("channel_name", text="채널 이름")
@@ -699,7 +699,7 @@ class PacketCaptureApp:
         frame.columnconfigure(3, weight=1)
         frame.rowconfigure(3, weight=1)
 
-        ttk.Label(frame, text="친구 코드 (5글자)").grid(
+        ttk.Label(frame, text="프로필 코드 (5~6글자)").grid(
             row=0, column=0, sticky="w", padx=(0, 8), pady=(0, 4)
         )
         self.ppsn_code_entry = ttk.Entry(frame, textvariable=self.ppsn_code_var, width=12)
@@ -804,8 +804,8 @@ class PacketCaptureApp:
             return
 
         code = self.ppsn_code_var.get().strip()
-        if not re.fullmatch(r"[A-Za-z0-9]{5}", code):
-            messagebox.showerror("입력 오류", "친구 코드는 영문 대소문자/숫자의 5글자여야 합니다.")
+        if not re.fullmatch(r"[A-Za-z0-9]{5,6}", code):
+            messagebox.showerror("입력 오류", "프로필 코드는 영문 대소문자/숫자의 5~6글자여야 합니다.")
             self.ppsn_code_entry.focus_set()
             return
 
@@ -847,8 +847,8 @@ class PacketCaptureApp:
             return
 
         code = self.ppsn_code_var.get().strip()
-        if not re.fullmatch(r"[A-Za-z0-9]{5}", code):
-            messagebox.showerror("입력 오류", "친구 코드는 영문 대소문자/숫자의 5글자여야 합니다.")
+        if not re.fullmatch(r"[A-Za-z0-9]{5,6}", code):
+            messagebox.showerror("입력 오류", "프로필 코드는 영문 대소문자/숫자의 5~6글자여야 합니다.")
             if self.ppsn_code_entry:
                 self.ppsn_code_entry.focus_set()
             return
@@ -944,7 +944,7 @@ class PacketCaptureApp:
                         "type": "done",
                         "task": "ppsn",
                         "success": False,
-                        "text": "[결과] 친구 목록 어디에서도 해당 친구 코드를 찾지 못했습니다.",
+                        "text": "[결과] 친구 목록 어디에서도 해당 프로필 코드를 찾지 못했습니다.",
                     }
                 )
             else:
@@ -955,7 +955,7 @@ class PacketCaptureApp:
                         "task": "ppsn",
                         "success": True,
                         "text": (
-                            f"[결과] 친구 코드 {code.upper()} 의 PPSN은 {ppsn} 입니다. "
+                            f"[결과] 프로필 코드 {code.upper()} 의 PPSN은 {ppsn} 입니다. "
                             f"(친구 {via_friend} 의 목록에서 확인)"
                         ),
                         "ppsn": ppsn,
@@ -1073,7 +1073,7 @@ class PacketCaptureApp:
             profile = (entry.profile_code or "").strip().upper()
             if not profile or profile in seen:
                 continue
-            if not re.fullmatch(r"[A-Za-z0-9]{5}", profile):
+            if not re.fullmatch(r"[A-Za-z0-9]{5,6}", profile):
                 continue
             seen.add(profile)
             codes.append(profile)
@@ -1095,8 +1095,8 @@ class PacketCaptureApp:
 
         if self.friend_search_phase == 1:
             code = self.friend_code_var.get().strip()
-            if not re.fullmatch(r"[A-Za-z0-9]{5}", code):
-                messagebox.showerror("입력 오류", "친구 코드는 영문 대소문자/숫자의 5글자여야 합니다.")
+            if not re.fullmatch(r"[A-Za-z0-9]{5,6}", code):
+                messagebox.showerror("입력 오류", "프로필 코드는 영문 대소문자/숫자의 5~6글자여야 합니다.")
                 if self.friend_code_entry and self.friend_code_entry.winfo_exists():
                     self.friend_code_entry.focus_set()
                 return
@@ -1118,7 +1118,7 @@ class PacketCaptureApp:
         else:
             codes = self._collect_second_phase_codes()
             if not codes:
-                messagebox.showinfo("알림", "2차 검색에 사용할 친구 코드가 없습니다.")
+                messagebox.showinfo("알림", "2차 검색에 사용할 프로필 코드가 없습니다.")
                 return
             self.friend_status_var.set("[정보] 2차 검색을 시작합니다.")
             self.friend_search_stop_event.clear()
@@ -1165,7 +1165,7 @@ class PacketCaptureApp:
                 if stop_event.is_set():
                     break
                 log(
-                    f"[정보] {description} 검색 {index}/{len(codes)} - 친구 코드 {code} 의 목록을 수집합니다."
+                    f"[정보] {description} 검색 {index}/{len(codes)} - 프로필 코드 {code} 의 목록을 수집합니다."
                 )
                 try:
                     entries = fetch_friend_statuses(

@@ -13,10 +13,10 @@ from pydantic import BaseModel
 from capture_app.friend_services import (
     find_friend_by_world_code,
     find_ppsn,
+    find_profile_entry,
     iter_friend_pages,
 )
 
-from ..db import insert_friend_search
 
 router = APIRouter(prefix="/api", tags=["friends"])
 
@@ -93,6 +93,11 @@ async def ws_ppsn(websocket: WebSocket) -> None:
                 world_code = msg.get("world_code", "")
                 delay = float(msg.get("delay", 0.5))
                 await _run_channel_ws(websocket, code, world_code, delay)
+
+            elif action == "profile_search":
+                code = msg.get("code", "")
+                delay = float(msg.get("delay", 0.5))
+                await _run_profile_search_ws(websocket, code, delay)
 
     except WebSocketDisconnect:
         pass
@@ -198,6 +203,45 @@ async def _run_channel_ws(ws: WebSocket, code: str, world_code: str, delay: floa
         })
 
 
+async def _run_profile_search_ws(ws: WebSocket, code: str, delay: float) -> None:
+    loop = asyncio.get_event_loop()
+    logs: asyncio.Queue[dict] = asyncio.Queue()
+
+    def log(message: str) -> None:
+        logs.put_nowait({"type": "log", "text": message})
+
+    def do_search() -> Optional[dict]:
+        try:
+            return find_profile_entry(code, delay=delay, logger=log)
+        except Exception as exc:
+            logs.put_nowait({"type": "log", "text": f"[오류] {exc}"})
+            return None
+
+    task = loop.run_in_executor(None, do_search)
+
+    while not task.done():
+        try:
+            item = await asyncio.wait_for(logs.get(), timeout=0.2)
+            await ws.send_json(item)
+        except asyncio.TimeoutError:
+            pass
+
+    result = await task
+
+    while not logs.empty():
+        item = await logs.get()
+        await ws.send_json(item)
+
+    if result:
+        await ws.send_json({"type": "done", "success": True, "entry": result})
+    else:
+        await ws.send_json({
+            "type": "done",
+            "success": False,
+            "text": "[결과] 해당 프로필 코드를 친구 목록에서 찾지 못했습니다.",
+        })
+
+
 # ── WebSocket: 친구 검색 실시간 ───────────────────────────────────
 
 @ws_router.websocket("/ws/friends")
@@ -272,7 +316,7 @@ def _run_friend_search_blocking(
 
     try:
         page_num = 0
-        for _html, page_data in iter_friend_pages(code, delay=0.5):
+        for _html, page_data in iter_friend_pages(code, delay=0.4):
             if stop.is_set():
                 break
             page_num += 1
@@ -293,14 +337,6 @@ def _run_friend_search_blocking(
                 }
                 for e in entries
             ]
-            # save to DB
-            for r in result_list:
-                r_copy = dict(r)
-                r_copy["search_code"] = code
-                try:
-                    insert_friend_search(r_copy)
-                except Exception:
-                    pass
             q.put_nowait({
                 "type": "result",
                 "entries": result_list,

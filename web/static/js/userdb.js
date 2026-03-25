@@ -3,6 +3,7 @@
  */
 const UserDB = (() => {
   let entries = [];
+  let filterText = '';
   let ctxMenu = null;
   let sortKey = null;
   let sortAsc = true;
@@ -14,7 +15,10 @@ const UserDB = (() => {
     { key: 'guild', label: '길드' },
     { key: 'main_map', label: '주 사냥터' },
     { key: 'ppsn', label: 'PPSN' },
+    { key: 'friend_list', label: '친구목록' },
   ];
+
+  const TAG_FIELDS = new Set(['ingame_nick', 'friend_list']);
 
   async function init() {
     setupHeaderSort();
@@ -55,14 +59,28 @@ const UserDB = (() => {
     });
   }
 
+  function getFiltered() {
+    if (!filterText) return entries;
+    const q = filterText.toLowerCase();
+    return entries.filter(e =>
+      COLUMNS.some(col => (e[col.key] || '').toLowerCase().includes(q))
+    );
+  }
+
   function getSorted() {
-    if (!sortKey) return entries;
-    return [...entries].sort((a, b) => {
+    const base = getFiltered();
+    if (!sortKey) return base;
+    return [...base].sort((a, b) => {
       const va = (a[sortKey] || '').toLowerCase();
       const vb = (b[sortKey] || '').toLowerCase();
       const cmp = va < vb ? -1 : va > vb ? 1 : 0;
       return sortAsc ? cmp : -cmp;
     });
+  }
+
+  function setFilter(value) {
+    filterText = value.trim();
+    render();
   }
 
   async function load() {
@@ -79,20 +97,126 @@ const UserDB = (() => {
   function render() {
     const tbody = document.getElementById('userdb-tbody');
     tbody.innerHTML = '';
-    document.getElementById('userdb-count').textContent = String(entries.length);
     const sorted = getSorted();
+    const total = entries.length;
+    const shown = sorted.length;
+    document.getElementById('userdb-count').textContent =
+      filterText ? `${shown}/${total}` : String(total);
     for (const entry of sorted) {
       const tr = document.createElement('tr');
       for (const col of COLUMNS) {
         const td = document.createElement('td');
-        td.textContent = entry[col.key] || '';
         td.dataset.profileCode = entry.profile_code;
         td.dataset.field = col.key;
+        if (TAG_FIELDS.has(col.key)) {
+          renderNickTags(td, entry[col.key] || '');
+        } else {
+          td.textContent = entry[col.key] || '';
+        }
         td.addEventListener('contextmenu', onCellContextMenu);
         tr.appendChild(td);
       }
       tbody.appendChild(tr);
     }
+  }
+
+  // ── 인겜닉 태그 렌더링 ──────────────────────────────────────
+  function parseTags(value) {
+    return (value || '').split(',').map(s => s.trim()).filter(s => s);
+  }
+
+  function renderNickTags(td, value) {
+    td.innerHTML = '';
+    const tags = parseTags(value);
+    for (const tag of tags) {
+      td.appendChild(makeTagEl(tag));
+    }
+  }
+
+  function makeTagEl(text) {
+    const span = document.createElement('span');
+    span.className = 'nick-tag';
+    span.textContent = text;
+    return span;
+  }
+
+  // ── 인겜닉 태그 편집기 ───────────────────────────────────────
+  function editIngameNickCell(profileCode, field, td) {
+    const current = td.dataset.rawValue || [...td.querySelectorAll('.nick-tag')]
+      .map(s => s.textContent).join(',');
+
+    const tags = parseTags(current);
+    let committed = false;
+
+    const editor = document.createElement('div');
+    editor.className = 'nick-tag-editor';
+
+    function buildEditor() {
+      editor.innerHTML = '';
+      for (const tag of tags) {
+        const span = document.createElement('span');
+        span.className = 'nick-tag';
+        span.textContent = tag;
+        const rm = document.createElement('span');
+        rm.className = 'nick-tag-remove';
+        rm.textContent = '×';
+        rm.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          tags.splice(tags.indexOf(tag), 1);
+          buildEditor();
+        });
+        span.appendChild(rm);
+        editor.appendChild(span);
+      }
+      const inp = document.createElement('input');
+      inp.className = 'nick-tag-input';
+      inp.placeholder = '닉네임 입력';
+      inp.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ',') {
+          e.preventDefault();
+          const val = inp.value.trim().replace(/,/g, '');
+          if (val && !tags.includes(val)) tags.push(val);
+          buildEditor();
+          editor.querySelector('.nick-tag-input').focus();
+        }
+        if (e.key === 'Escape') {
+          committed = true;
+          restoreCell();
+        }
+        if (e.key === 'Backspace' && inp.value === '' && tags.length) {
+          tags.pop();
+          buildEditor();
+          editor.querySelector('.nick-tag-input').focus();
+        }
+      });
+      inp.addEventListener('blur', () => setTimeout(commit, 150));
+      editor.appendChild(inp);
+      inp.focus();
+    }
+
+    function commit() {
+      if (committed) return;
+      committed = true;
+      const newVal = tags.join(',');
+      td.innerHTML = '';
+      renderNickTags(td, newVal);
+      if (newVal !== current) saveField(profileCode, field, newVal);
+    }
+
+    function restoreCell() {
+      td.innerHTML = '';
+      renderNickTags(td, current);
+    }
+
+    editor.addEventListener('mousedown', (e) => {
+      if (e.target === editor) {
+        setTimeout(() => editor.querySelector('.nick-tag-input')?.focus(), 0);
+      }
+    });
+
+    td.innerHTML = '';
+    td.appendChild(editor);
+    buildEditor();
   }
 
   // ── 우클릭 컨텍스트 메뉴 ────────────────────────────────────
@@ -143,7 +267,8 @@ const UserDB = (() => {
 
   // ── 인라인 편집 ─────────────────────────────────────────────
   function editCell(profileCode, field, td) {
-    if (field === 'profile_code') return; // 기준 열은 수정 불가
+    if (field === 'profile_code') return;
+    if (TAG_FIELDS.has(field)) return editIngameNickCell(profileCode, field, td);
     const current = td.textContent;
     const input = document.createElement('input');
     input.type = 'text';
@@ -187,7 +312,7 @@ const UserDB = (() => {
   }
 
   async function clearCell(profileCode, field, td) {
-    td.textContent = '';
+    td.innerHTML = '';
     await saveField(profileCode, field, '');
   }
 
@@ -214,6 +339,19 @@ const UserDB = (() => {
     }
   }
 
+  // ── 중복 프로필 제거 ─────────────────────────────────────────
+  async function deduplicate() {
+    try {
+      const res = await fetch('/api/user-db/deduplicate', { method: 'POST' });
+      const data = await res.json();
+      alert(`중복 제거 완료: ${data.removed}건 삭제되었습니다.`);
+      await load();
+    } catch (err) {
+      console.error('중복 제거 실패:', err);
+      alert('중복 제거 실패: ' + err);
+    }
+  }
+
   // ── 외부 호출: 친구검색 / 유저리스트에서 저장 ──────────────
   async function saveEntries(newEntries) {
     if (!newEntries.length) return;
@@ -235,5 +373,16 @@ const UserDB = (() => {
     }
   }
 
-  return { init, load, render, saveEntries, clearAll };
+  function getIngameNick(profileCode) {
+    if (!profileCode) return '';
+    const entry = entries.find(e => e.profile_code === profileCode);
+    return entry ? (entry.ingame_nick || '') : '';
+  }
+
+  function has(profileCode) {
+    if (!profileCode) return false;
+    return entries.some(e => e.profile_code === profileCode);
+  }
+
+  return { init, load, render, saveEntries, clearAll, deduplicate, getIngameNick, has, setFilter };
 })();

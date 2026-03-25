@@ -145,21 +145,6 @@ def clear_world_matches(session_id: Optional[str] = None) -> None:
         q.delete().neq("id", 0).execute()
 
 
-# ── friend_searches ───────────────────────────────────────────────
-
-def insert_friend_search(row: dict[str, Any]) -> Optional[dict[str, Any]]:
-    row.setdefault("searched_at", _now_iso())
-    resp = get_client().table("friend_searches").insert(row).execute()
-    return resp.data[0] if resp.data else None
-
-
-def get_friend_searches(search_code: Optional[str] = None) -> list[dict[str, Any]]:
-    q = get_client().table("friend_searches").select("*")
-    if search_code:
-        q = q.eq("search_code", search_code)
-    resp = q.order("searched_at", desc=True).execute()
-    return resp.data
-
 
 # ── settings ──────────────────────────────────────────────────────
 
@@ -187,8 +172,24 @@ def get_all_settings() -> dict[str, Any]:
 # ── user_db ───────────────────────────────────────────────────────
 
 def get_user_db_entries() -> list[dict[str, Any]]:
-    resp = get_client().table("user_db").select("*").order("updated_at", desc=True).execute()
-    return resp.data
+    PAGE = 1000
+    all_rows: list[dict[str, Any]] = []
+    offset = 0
+    while True:
+        resp = (
+            get_client()
+            .table("user_db")
+            .select("*")
+            .order("updated_at", desc=True)
+            .range(offset, offset + PAGE - 1)
+            .execute()
+        )
+        batch = resp.data or []
+        all_rows.extend(batch)
+        if len(batch) < PAGE:
+            break
+        offset += PAGE
+    return all_rows
 
 
 def upsert_user_db_entries(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -217,3 +218,36 @@ def delete_user_db_entry(profile_code: str) -> None:
 
 def delete_all_user_db_entries() -> None:
     get_client().table("user_db").delete().neq("profile_code", "").execute()
+
+
+def deduplicate_user_db_entries() -> int:
+    """대소문자 구분 없이 동일한 profile_code 중복 행을 제거한다.
+    같은 그룹에서 updated_at 이 가장 최신인 행 1개만 남기고 나머지를 삭제한다.
+    삭제된 행 수를 반환한다."""
+    rows = get_user_db_entries()
+
+    # 대문자 기준으로 그룹화 (NULL 행 스킵)
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        pc = row.get("profile_code")
+        if not pc:
+            continue
+        key = pc.strip().upper()
+        if not key:
+            continue
+        groups.setdefault(key, []).append(row)
+
+    to_delete: list[str] = []
+    for key, group in groups.items():
+        if len(group) <= 1:
+            continue
+        # updated_at 내림차순 정렬 → 첫 번째(최신)만 남기고 나머지 삭제 대상
+        group.sort(key=lambda r: r.get("updated_at") or "", reverse=True)
+        for row in group[1:]:
+            to_delete.append(row["profile_code"])
+
+    client = get_client()
+    for pc in to_delete:
+        client.table("user_db").delete().eq("profile_code", pc).execute()
+
+    return len(to_delete)

@@ -6,6 +6,7 @@ import html as html_lib
 import re
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Iterable, Optional
 from urllib.error import HTTPError, URLError
 
@@ -45,26 +46,53 @@ def get_initial_friends(target_code: str) -> list[str]:
     return codes
 
 
-def iter_friend_pages(friend_code: str, *, delay: float = 0.5) -> Iterable[tuple[str, FriendPageData]]:
+def _fetch_page(friend_code: str, page: int) -> tuple[int, Optional[str]]:
+    """단일 페이지를 fetch하여 (page_number, html|None) 반환."""
+    url = FRIENDS_PAGE_URL.format(code=friend_code, page=page)
+    try:
+        html = fetch_html(url, referer=PROFILE_URL.format(code=friend_code))
+        return page, html
+    except HTTPError as exc:
+        if exc.code == 404:
+            return page, None
+        raise
+
+
+def iter_friend_pages(friend_code: str, *, delay: float = 0.4) -> Iterable[tuple[str, FriendPageData]]:
     page = 1
     seen_empty = 0
     while True:
-        url = FRIENDS_PAGE_URL.format(code=friend_code, page=page)
-        try:
-            html = fetch_html(url, referer=PROFILE_URL.format(code=friend_code))
-        except HTTPError as exc:
-            if exc.code == 404:
+        # 2페이지씩 병렬 요청
+        pages_to_fetch = [page, page + 1]
+        results: dict[int, Optional[str]] = {}
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = {
+                pool.submit(_fetch_page, friend_code, p): p
+                for p in pages_to_fetch
+            }
+            for fut in as_completed(futures):
+                p, html = fut.result()
+                results[p] = html
+
+        should_break = False
+        for p in pages_to_fetch:
+            html = results.get(p)
+            if html is None:
+                should_break = True
                 break
-            raise
-        page_data = extract_entries_from_friends_page(html)
-        if not page_data.entries:
-            seen_empty += 1
-            if seen_empty >= 2:
-                break
-        else:
-            seen_empty = 0
-            yield html, page_data
-        page += 1
+            page_data = extract_entries_from_friends_page(html)
+            if not page_data.entries:
+                seen_empty += 1
+                if seen_empty >= 2:
+                    should_break = True
+                    break
+            else:
+                seen_empty = 0
+                yield html, page_data
+
+        if should_break:
+            break
+        page += 2
         if delay:
             time.sleep(delay)
 
@@ -107,6 +135,46 @@ def find_ppsn(
             log(f"[경고] {friend_code} 의 친구 목록을 불러오지 못했습니다: {exc}")
         except HTTPError as exc:
             log(f"[경고] {friend_code} 의 친구 목 요청 실패({exc.code}): {exc.reason}")
+
+    return None
+
+
+def find_profile_entry(
+    target_code: str, *, delay: float = 0.5, logger: Optional[Callable[[str], None]] = None
+) -> Optional[dict]:
+    """target_code 의 전체 프로필 데이터(상태, 닉네임, 월드 등)를 친구 목록에서 탐색해 반환한다."""
+    log = logger or (lambda m: None)
+    target_code_upper = target_code.upper()
+    log("[정보] 친구 목록을 가져오는 중입니다...")
+    try:
+        friends = get_initial_friends(target_code_upper)
+    except HTTPError as exc:
+        log(f"[경고] 프로필 페이지 요청 실패({exc.code}): {exc.reason}")
+        return None
+    except RuntimeError as exc:
+        log(f"[오류] {exc}")
+        return None
+
+    log(f"[정보] {len(friends)}명의 친구 목록에서 탐색을 시작합니다.")
+    for friend_code in friends:
+        log(f"[정보] 친구 {friend_code} 의 목록을 탐색합니다...")
+        try:
+            for _html, page_data in iter_friend_pages(friend_code, delay=delay):
+                for entry in page_data.entries:
+                    if entry.code.upper() == target_code_upper:
+                        log(f"[결과] 친구 {friend_code} 의 목록에서 발견했습니다.")
+                        return {
+                            "status": "온라인" if entry.is_online else "오프라인",
+                            "ppsn": entry.ppsn,
+                            "profile_code": entry.code,
+                            "display_name": entry.display_name,
+                            "world_name": entry.world_name,
+                            "game_instance_id": entry.game_instance_id,
+                        }
+        except URLError as exc:
+            log(f"[경고] {friend_code} 의 목록을 불러오지 못했습니다: {exc}")
+        except HTTPError as exc:
+            log(f"[경고] {friend_code} 의 목록 요청 실패({exc.code}): {exc.reason}")
 
     return None
 

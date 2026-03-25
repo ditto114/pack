@@ -148,6 +148,48 @@ button.primary:hover:not(:disabled) {
   border-radius: 3px;
 }
 
+/* ── 인겜닉 태그 ──────────────────────────────────────────────── */
+.nick-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.nick-tag-remove {
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1;
+}
+.nick-tag-remove:hover { color: var(--text); }
+.nick-tag-editor {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px;
+  min-width: 120px;
+  padding: 2px 4px;
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  cursor: text;
+}
+.nick-tag-editor .nick-tag { background: var(--surface2); }
+.nick-tag-input {
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  outline: none;
+  min-width: 60px;
+  width: 60px;
+}
+
 /* ── 패킷 모달 ────────────────────────────────────────────────── */
 .packet-modal-content {
   width: 900px;
@@ -445,6 +487,51 @@ tr.selected { background: var(--accent2) !important; }
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 200px;
+}
+
+/* ── 다중 검색 모달 ──────────────────────────────────────────── */
+.multi-search-modal-content {
+  width: 92vw;
+  max-width: 1400px;
+  max-height: 88vh;
+}
+.ms-input-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.ms-input-row label { color: var(--text-dim); white-space: nowrap; }
+#ms-status {
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 2px 0;
+}
+.ms-tables-wrap {
+  display: flex;
+  gap: 10px;
+  flex: 1;
+  min-height: 0;
+}
+.ms-table-panel {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ms-table-panel h4 {
+  font-size: 13px;
+  color: var(--accent);
+  font-weight: 600;
+}
+.ms-table-wrap {
+  flex: 1;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  max-height: 60vh;
 }
 
 /* 스크롤바 */

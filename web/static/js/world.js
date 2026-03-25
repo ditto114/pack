@@ -197,7 +197,6 @@ const World = (() => {
       renderGrid('experiment-tbody', experimentIds);
     }
     if (channelChanged) {
-      experimentChannels.sort(compareChannel);
       renderGrid('experiment-ch-tbody', experimentChannels);
     }
   }

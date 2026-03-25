@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>무기</title>
-  <link rel="stylesheet" href="/css/style.css?v=15">
+  <title>LAKE - CRM Dashboard</title>
+  <link rel="stylesheet" href="/css/style.css?v=16">
 </head>
 <body>
   <div id="app">
@@ -39,7 +39,7 @@
       <button id="btn-start" onclick="App.startCapture()">캡쳐 시작</button>
       <button id="btn-stop" onclick="App.stopCapture()" disabled>캡쳐 중지</button>
       <button id="btn-packet" onclick="App.togglePacketModal()">패킷 읽기</button>
-      <button id="btn-ppsn" onclick="App.togglePpsn()">PPSN 찾기</button>
+      <button id="btn-ppsn" onclick="App.togglePpsn()">프로필 검색</button>
       <button id="btn-world" onclick="App.toggleWorld()">월드 매칭</button>
       <button id="btn-friend" onclick="App.toggleFriend()">친구검색</button>
       <button id="btn-userlist" onclick="UserList.open()">유저리스트</button>
@@ -51,7 +51,9 @@
       <div id="userdb-section">
         <div id="userdb-header">
           <span>유저 DB (<span id="userdb-count">0</span>명)</span>
-          <button onclick="UserDB.clearAll()" style="margin-left:auto">초기화</button>
+          <input type="text" id="userdb-search" placeholder="검색..." style="margin-left:auto;width:140px" oninput="UserDB.setFilter(this.value)">
+          <button onclick="UserDB.deduplicate()">중복프로필 제거</button>
+          <button onclick="UserDB.clearAll()">초기화</button>
         </div>
         <div id="userdb-table-wrap">
           <table id="userdb-table">
@@ -63,6 +65,7 @@
                 <th>길드</th>
                 <th>주 사냥터</th>
                 <th>PPSN</th>
+                <th>친구목록</th>
               </tr>
             </thead>
             <tbody id="userdb-tbody"></tbody>
@@ -73,11 +76,6 @@
       <!-- 월드 매칭 패널 (토글) -->
       <div id="world-panel" class="side-panel hidden">
         <h3>월드 매칭</h3>
-        <div id="world-order">
-          <span>매칭 순서:</span>
-          <label><input type="checkbox" id="world-order-wf" onchange="World.toggleOrder('world-first')"> 월드ID → 채널</label>
-          <label><input type="checkbox" id="world-order-cf" onchange="World.toggleOrder('channel-first')"> 채널 → 월드ID</label>
-        </div>
         <div id="world-table-wrap">
           <table id="world-table">
             <thead>
@@ -156,8 +154,9 @@
                 <th>상태</th>
                 <th>프로필 코드</th>
                 <th>채널명</th>
-                <th>메월닉</th>
+                <th>인겜닉</th>
                 <th>월드명</th>
+                <th>메월닉</th>
                 <th>채널 코드</th>
                 <th>PPSN</th>
               </tr>
@@ -167,6 +166,8 @@
         </div>
         <div class="panel-actions">
           <button onclick="Friends.saveToUserDB()">유저 DB에 저장</button>
+          <button onclick="Friends.saveFriendList()">친구목록 저장</button>
+          <button onclick="MultiSearch.open()">다중 검색</button>
         </div>
       </div>
     </div>
@@ -213,11 +214,71 @@
       </div>
     </div>
 
-    <!-- PPSN 모달 -->
-    <div id="ppsn-modal" class="modal hidden">
-      <div class="modal-content">
+    <!-- 다중 검색 모달 -->
+    <div id="multi-search-modal" class="modal hidden">
+      <div class="modal-content multi-search-modal-content">
         <div class="modal-header">
-          <h3>PPSN 찾기</h3>
+          <h3>다중 검색</h3>
+          <button class="close-btn" onclick="MultiSearch.close()">&times;</button>
+        </div>
+        <div class="ms-input-row">
+          <label>프로필 코드 (5~6글자)</label>
+          <input type="text" id="ms-code" maxlength="6" style="width:90px">
+          <button id="ms-search-btn" onclick="MultiSearch.search()">검색</button>
+          <button id="ms-stop-btn" onclick="MultiSearch.stop()" disabled>중지</button>
+          <button onclick="MultiSearch.saveToUserDB()">유저 DB에 저장</button>
+        </div>
+        <div id="ms-status"></div>
+        <div class="ms-tables-wrap">
+          <div class="ms-table-panel">
+            <h4>1촌 친구 목록 (<span id="ms-phase1-count">0</span>명)</h4>
+            <div class="ms-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>상태</th>
+                    <th>프로필 코드</th>
+                    <th>채널명</th>
+                    <th>메월닉</th>
+                    <th>인겜닉</th>
+                    <th>월드명</th>
+                    <th>채널 코드</th>
+                    <th>PPSN</th>
+                  </tr>
+                </thead>
+                <tbody id="ms-phase1-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="ms-table-panel">
+            <h4>2촌 친구 목록 (<span id="ms-phase2-count">0</span>명)</h4>
+            <div class="ms-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>상태</th>
+                    <th>프로필 코드</th>
+                    <th>채널명</th>
+                    <th>메월닉</th>
+                    <th>인겜닉</th>
+                    <th>월드명</th>
+                    <th>채널 코드</th>
+                    <th>PPSN</th>
+                  </tr>
+                </thead>
+                <tbody id="ms-phase2-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 프로필 검색 모달 -->
+    <div id="ppsn-modal" class="modal hidden">
+      <div class="modal-content" style="width:640px">
+        <div class="modal-header">
+          <h3>프로필 검색</h3>
           <button class="close-btn" onclick="App.togglePpsn()">&times;</button>
         </div>
         <div class="ppsn-form">
@@ -225,38 +286,38 @@
           <input type="text" id="ppsn-code" maxlength="6">
           <label>요청 간 대기 (초)</label>
           <input type="number" id="ppsn-delay" value="0.5" step="0.1" min="0">
-          <button id="ppsn-search-btn" onclick="PPSN.search()">PPSN 검색</button>
+          <button id="ppsn-search-btn" onclick="PPSN.search()">프로필 검색</button>
         </div>
-        <div class="ppsn-form" style="margin-top:8px">
-          <label>월드 코드 (17자리)</label>
-          <input type="text" id="ppsn-world-code" maxlength="17">
-          <button id="channel-search-btn" onclick="PPSN.channelSearch()">채널검색</button>
-        </div>
-        <div id="ppsn-log-label">검색 로그</div>
+        <div id="ppsn-log-label" style="font-size:12px;color:var(--text-dim)">검색 로그</div>
         <pre id="ppsn-log"></pre>
-        <div class="ppsn-result-row">
-          <label>결과 PPSN</label>
-          <input type="text" id="ppsn-result" readonly>
-          <button onclick="PPSN.copyResult()">복사</button>
-        </div>
-        <div class="ppsn-result-row">
-          <label>채널 검색 결과</label>
-          <input type="text" id="channel-result" readonly>
-        </div>
-        <div class="ppsn-result-row">
-          <label>탐색한 온라인 친구 수</label>
-          <input type="text" id="channel-count" value="0" readonly>
+        <div id="ppsn-result-wrap" style="overflow:auto;border:1px solid var(--border);border-radius:var(--radius)">
+          <table id="ppsn-result-table">
+            <thead>
+              <tr>
+                <th>상태</th>
+                <th>프로필 코드</th>
+                <th>채널명</th>
+                <th>인겜닉</th>
+                <th>월드명</th>
+                <th>메월닉</th>
+                <th>채널 코드</th>
+                <th>PPSN</th>
+              </tr>
+            </thead>
+            <tbody id="ppsn-result-tbody"></tbody>
+          </table>
         </div>
       </div>
     </div>
   </div>
 
-  <script src="/js/ws.js?v=15"></script>
-  <script src="/js/packets.js?v=15"></script>
-  <script src="/js/friends.js?v=15"></script>
-  <script src="/js/world.js?v=15"></script>
-  <script src="/js/userlist.js?v=15"></script>
-  <script src="/js/userdb.js?v=15"></script>
-  <script src="/js/app.js?v=15"></script>
+  <script src="/js/ws.js?v=16"></script>
+  <script src="/js/packets.js?v=16"></script>
+  <script src="/js/friends.js?v=16"></script>
+  <script src="/js/world.js?v=16"></script>
+  <script src="/js/userlist.js?v=16"></script>
+  <script src="/js/userdb.js?v=16"></script>
+  <script src="/js/multi-search.js?v=16"></script>
+  <script src="/js/app.js?v=16"></script>
 </body>
 </html>

@@ -13,12 +13,13 @@ from ..db import (
     update_user_db_field,
     delete_user_db_entry,
     delete_all_user_db_entries,
+    deduplicate_user_db_entries,
     _now_iso,
 )
 
 router = APIRouter(prefix="/api/user-db", tags=["user-db"])
 
-ALLOWED_FIELDS = {"ingame_nick", "mw_nick", "guild", "main_map", "ppsn"}
+ALLOWED_FIELDS = {"ingame_nick", "mw_nick", "guild", "main_map", "ppsn", "friend_list"}
 
 
 class UpsertEntry(BaseModel):
@@ -28,6 +29,7 @@ class UpsertEntry(BaseModel):
     guild: Optional[str] = None
     main_map: Optional[str] = None
     ppsn: Optional[str] = None
+    friend_list: Optional[str] = None
 
 
 class BulkSaveRequest(BaseModel):
@@ -50,6 +52,12 @@ def delete_all() -> dict[str, str]:
     return {"status": "cleared"}
 
 
+@router.post("/deduplicate")
+def deduplicate() -> dict[str, Any]:
+    removed = deduplicate_user_db_entries()
+    return {"status": "ok", "removed": removed}
+
+
 @router.post("/bulk-save")
 def bulk_save(body: BulkSaveRequest) -> dict[str, Any]:
     """부분 필드만 전달해도 기존 값을 보존하며 upsert."""
@@ -58,21 +66,23 @@ def bulk_save(body: BulkSaveRequest) -> dict[str, Any]:
 
     # 기존 레코드 조회하여 병합
     existing_rows = get_user_db_entries()
-    existing_map = {r["profile_code"]: r for r in existing_rows}
+    existing_map = {r["profile_code"]: r for r in existing_rows if r.get("profile_code")}
 
     now = _now_iso()
     rows: list[dict[str, Any]] = []
     for e in body.entries:
         if not e.profile_code:
             continue
-        base = existing_map.get(e.profile_code, {})
+        pc = e.profile_code.strip()
+        base = existing_map.get(pc, {})
         row = {
-            "profile_code": e.profile_code,
+            "profile_code": pc,
             "ingame_nick": e.ingame_nick if e.ingame_nick is not None else base.get("ingame_nick", ""),
             "mw_nick": e.mw_nick if e.mw_nick is not None else base.get("mw_nick", ""),
             "guild": e.guild if e.guild is not None else base.get("guild", ""),
             "main_map": e.main_map if e.main_map is not None else base.get("main_map", ""),
             "ppsn": e.ppsn if e.ppsn is not None else base.get("ppsn", ""),
+            "friend_list": e.friend_list if e.friend_list is not None else base.get("friend_list", ""),
             "updated_at": now,
         }
         rows.append(row)

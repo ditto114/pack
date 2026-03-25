@@ -8,13 +8,15 @@ const Friends = (() => {
   const entryKeys = new Set();
   let sortKey = null;
   let sortAsc = true;
+  let lastSearchCode = '';
 
   const COLUMNS = [
     { key: 'status',           label: '상태' },
     { key: 'profile_code',     label: '프로필 코드' },
     { key: '_channel_name',    label: '채널명' },
-    { key: 'display_name',     label: '메월닉' },
+    { key: '_ingame_nick',     label: '인겜닉' },
     { key: 'world_name',       label: '월드명' },
+    { key: 'display_name',     label: '메월닉' },
     { key: 'game_instance_id', label: '채널 코드' },
     { key: 'ppsn',             label: 'PPSN' },
   ];
@@ -31,6 +33,7 @@ const Friends = (() => {
 
     if (!headerSortInit) { setupHeaderSort(); headerSortInit = true; }
     clearTable();
+    lastSearchCode = code;
     setRunning(true);
     document.getElementById('friend-status').textContent = '[정보] 친구 목록 검색을 시작합니다.';
 
@@ -103,14 +106,17 @@ const Friends = (() => {
     tbody.innerHTML = '';
     document.getElementById('friend-count-val').textContent = entries.length;
     for (const e of getSorted()) {
+      e._ingame_nick = UserDB.getIngameNick(e.profile_code);
       const statusIcon = e.status === '온라인' ? '🟢' : '⛔';
+      const isNew = e.profile_code && !UserDB.has(e.profile_code);
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td>${statusIcon}</td>
-        <td>${e.profile_code ? '#' + esc(e.profile_code) : ''}</td>
+        <td style="color:${isNew ? '#ffff00' : ''}">${e.profile_code ? '#' + esc(e.profile_code) : ''}</td>
         <td>${esc(e._channel_name)}</td>
-        <td>${esc(e.display_name)}</td>
+        <td>${esc(e._ingame_nick)}</td>
         <td>${esc(e.world_name)}</td>
+        <td>${esc(e.display_name)}</td>
         <td>${esc(e.game_instance_id)}</td>
         <td>${esc(e.ppsn)}</td>
       `;
@@ -172,18 +178,45 @@ const Friends = (() => {
     UserDB.saveEntries(data);
   }
 
+  async function saveFriendList() {
+    if (!lastSearchCode) {
+      alert('먼저 친구 검색을 실행하세요.');
+      return;
+    }
+    const codes = entries.map(e => e.profile_code).filter(c => c);
+    if (!codes.length) {
+      alert('저장할 친구 목록이 없습니다.');
+      return;
+    }
+    const friendListVal = codes.join(',');
+    try {
+      const res = await fetch(`/api/user-db/${encodeURIComponent(lastSearchCode)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ field: 'friend_list', value: friendListVal }),
+      });
+      const data = await res.json();
+      if (data.status === 'ok') {
+        alert(`친구목록 ${codes.length}명이 저장되었습니다.`);
+        await UserDB.load();
+      } else {
+        alert('저장 실패: ' + (data.error || ''));
+      }
+    } catch (err) {
+      alert('저장 실패: ' + err);
+    }
+  }
+
   function esc(s) { return Packets.escapeHtml(s || ''); }
 
-  return { search, stop, saveToUserDB };
+  return { search, stop, saveToUserDB, saveFriendList };
 })();
 
 
 /**
- * PPSN / 채널 검색 모달 로직
+ * 프로필 검색 모달 로직
  */
 const PPSN = (() => {
-  let ws = null;
-
   function search() {
     const code = document.getElementById('ppsn-code').value.trim();
     if (!/^[A-Za-z0-9]{5,6}$/.test(code)) {
@@ -192,43 +225,13 @@ const PPSN = (() => {
     const delay = parseFloat(document.getElementById('ppsn-delay').value) || 0.5;
 
     clearLog();
-    appendLog('[정보] PPSN 검색을 시작합니다.');
-    document.getElementById('ppsn-result').value = '';
+    clearResult();
+    appendLog('[정보] 프로필 검색을 시작합니다.');
     setSearching(true);
 
-    ws = WS.connect('/ws/ppsn', {
+    WS.connect('/ws/ppsn', {
       onOpen(socket) {
-        socket.send(JSON.stringify({ action: 'ppsn_search', code, delay }));
-      },
-      onMessage(data) {
-        handleMsg(data);
-      },
-      onClose() {
-        setSearching(false);
-      },
-    });
-  }
-
-  function channelSearch() {
-    const code = document.getElementById('ppsn-code').value.trim();
-    if (!/^[A-Za-z0-9]{5,6}$/.test(code)) {
-      return alert('프로필 코드는 영문 대소문자/숫자의 5~6글자여야 합니다.');
-    }
-    const worldCode = document.getElementById('ppsn-world-code').value.trim();
-    if (!/^\d{17}$/.test(worldCode)) {
-      return alert('월드 코드는 숫자 17자리여야 합니다.');
-    }
-    const delay = parseFloat(document.getElementById('ppsn-delay').value) || 0.5;
-
-    clearLog();
-    appendLog('[정보] 채널 검색을 시작합니다.');
-    document.getElementById('channel-result').value = '';
-    document.getElementById('channel-count').value = '0';
-    setSearching(true);
-
-    ws = WS.connect('/ws/ppsn', {
-      onOpen(socket) {
-        socket.send(JSON.stringify({ action: 'channel_search', code, world_code: worldCode, delay }));
+        socket.send(JSON.stringify({ action: 'profile_search', code, delay }));
       },
       onMessage(data) {
         handleMsg(data);
@@ -242,19 +245,40 @@ const PPSN = (() => {
   function handleMsg(data) {
     if (data.type === 'log') {
       appendLog(data.text || '');
-    } else if (data.type === 'progress') {
-      document.getElementById('channel-count').value = data.count || 0;
     } else if (data.type === 'done') {
-      appendLog(data.text || '');
-      if (data.ppsn) document.getElementById('ppsn-result').value = data.ppsn;
-      if (data.channel_result) document.getElementById('channel-result').value = data.channel_result;
+      if (data.text) appendLog(data.text);
+      if (data.success && data.entry) renderResult(data.entry);
       setSearching(false);
       WS.close('/ws/ppsn');
     }
   }
 
+  function renderResult(e) {
+    const tbody = document.getElementById('ppsn-result-tbody');
+    tbody.innerHTML = '';
+    const channelName = World.getChannelName(e.game_instance_id);
+    const ingameNick = UserDB.getIngameNick(e.profile_code);
+    const statusIcon = e.status === '온라인' ? '🟢' : '⛔';
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${statusIcon}</td>
+      <td>${e.profile_code ? '#' + esc(e.profile_code) : ''}</td>
+      <td>${esc(channelName)}</td>
+      <td>${esc(ingameNick)}</td>
+      <td>${esc(e.world_name)}</td>
+      <td>${esc(e.display_name)}</td>
+      <td>${esc(e.game_instance_id)}</td>
+      <td>${esc(e.ppsn)}</td>
+    `;
+    tbody.appendChild(tr);
+  }
+
   function clearLog() {
     document.getElementById('ppsn-log').textContent = '';
+  }
+
+  function clearResult() {
+    document.getElementById('ppsn-result-tbody').innerHTML = '';
   }
 
   function appendLog(msg) {
@@ -265,14 +289,9 @@ const PPSN = (() => {
 
   function setSearching(busy) {
     document.getElementById('ppsn-search-btn').disabled = busy;
-    document.getElementById('channel-search-btn').disabled = busy;
   }
 
-  function copyResult() {
-    const val = document.getElementById('ppsn-result').value;
-    if (!val) return alert('복사할 PPSN 결과가 없습니다.');
-    navigator.clipboard.writeText(val).then(() => alert('PPSN이 클립보드에 복사되었습니다.'));
-  }
+  function esc(s) { return Packets.escapeHtml(s || ''); }
 
-  return { search, channelSearch, copyResult };
+  return { search };
 })();

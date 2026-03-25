@@ -132,11 +132,32 @@
           <div class="panel-actions">
             <button onclick="World.clearExperiment()">초기화</button>
             <button onclick="World.saveExpToWorldMatch()">월드 매칭 데이터로 저장</button>
+            <button onclick="World.openExpDebug()">디버깅</button>
           </div>
         </div>
       </div>
 
-      <!-- 친구 검색 패널 (토글) -->
+      <!-- 실험 디버깅 모달 -->
+      <div id="exp-debug-modal" class="modal hidden">
+        <div class="modal-content" style="width:90vw;max-width:1000px">
+          <div class="modal-header">
+            <h3>실험 디버깅</h3>
+            <button class="close-btn" onclick="World.closeExpDebug()">&times;</button>
+          </div>
+          <div style="display:flex;gap:12px;height:60vh">
+            <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+              <h4 style="margin:0 0 6px">WorldId 매치 원본</h4>
+              <pre id="exp-debug-world" style="flex:1;overflow:auto;border:1px solid var(--border);border-radius:var(--radius);padding:8px;margin:0;white-space:pre-wrap;word-break:break-all;font-size:12px"></pre>
+            </div>
+            <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+              <h4 style="margin:0 0 6px">ChannelName 매치 ���본</h4>
+              <pre id="exp-debug-channel" style="flex:1;overflow:auto;border:1px solid var(--border);border-radius:var(--radius);padding:8px;margin:0;white-space:pre-wrap;word-break:break-all;font-size:12px"></pre>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 친�� 검색 패널 (토글) -->
       <div id="friend-panel" class="side-panel hidden">
         <h3>친구 검색</h3>
         <div class="friend-input">
@@ -210,6 +231,27 @@
         <div class="panel-actions">
           <button onclick="UserList.clear()">초기화</button>
           <button onclick="UserList.saveToUserDB()">유저 DB에 저장</button>
+          <button onclick="UserList.openDebug()">디버깅</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 유저리스트 디버깅 모달 -->
+    <div id="userlist-debug-modal" class="modal hidden">
+      <div class="modal-content" style="width:90vw;max-width:1000px">
+        <div class="modal-header">
+          <h3>유저리스트 디버깅</h3>
+          <button class="close-btn" onclick="UserList.closeDebug()">&times;</button>
+        </div>
+        <div style="display:flex;gap:12px;height:60vh">
+          <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+            <h4 style="margin:0 0 6px">패킷 원본</h4>
+            <pre id="debug-raw" style="flex:1;overflow:auto;border:1px solid var(--border);border-radius:var(--radius);padding:8px;margin:0;white-space:pre-wrap;word-break:break-all;font-size:12px"></pre>
+          </div>
+          <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+            <h4 style="margin:0 0 6px">전처리 후</h4>
+            <pre id="debug-sanitized" style="flex:1;overflow:auto;border:1px solid var(--border);border-radius:var(--radius);padding:8px;margin:0;white-space:pre-wrap;word-break:break-all;font-size:12px"></pre>
+          </div>
         </div>
       </div>
     </div>

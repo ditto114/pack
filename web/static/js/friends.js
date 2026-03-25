@@ -188,16 +188,15 @@ const Friends = (() => {
       alert('저장할 친구 목록이 없습니다.');
       return;
     }
-    const friendListVal = codes.join(',');
     try {
-      const res = await fetch(`/api/user-db/${encodeURIComponent(lastSearchCode)}`, {
-        method: 'PUT',
+      const res = await fetch('/api/user-db/save-friend-list', {
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ field: 'friend_list', value: friendListVal }),
+        body: JSON.stringify({ search_code: lastSearchCode, friend_codes: codes }),
       });
       const data = await res.json();
       if (data.status === 'ok') {
-        alert(`친구목록 ${codes.length}명이 저장되었습니다.`);
+        alert(`친구목록 저장 완료 (${data.updated}건 업데이트)`);
         await UserDB.load();
       } else {
         alert('저장 실패: ' + (data.error || ''));

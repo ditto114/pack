@@ -13,7 +13,10 @@
  */
 const UserList = (() => {
   let buffer = '';
+  const rawChunks = [];   // { bufStart, bufLen, raw }
+  let bufferOffset = 0;   // 트림으로 잘려나간 누적 길이
   const users = [];
+  const debugBlocks = [];
   const profileSet = new Set();
 
   // 정렬 상태
@@ -21,10 +24,13 @@ const UserList = (() => {
   let sortKey = null;
   let sortAsc = true;
 
+  // 블록 내 연속 키워드 간 최대 허용 간격
+  const MAX_KEYWORD_GAP = 50;
+
   // 값 추출 정규식
-  const PROFILE_VAL_RE = /Profile[-\s]+([A-Za-z0-9]{5,6})(?![A-Za-z0-9])/;
-  const NAME_VAL_RE = /(?<!Channel)Name[-\s]+([\uAC00-\uD7A3a-zA-Z0-9]+)/;
-  const MAP_VAL_RE = /Map(?!Online)[-\s]+([\s\S]+?)(?:[-\s]{4,}(?:Profile|Captcha|Cha)|[-\s]*$)/;
+  const PROFILE_VAL_RE = /Profile[- ]+([A-Za-z0-9]{5,6})(?![A-Za-z0-9])/;
+  const NAME_VAL_RE = /(?<!Channel)Name[- ]+([\uAC00-\uD7A3a-zA-Z0-9]+)/;
+  const MAP_VAL_RE = /Map(?!Online)[- ]+([^-]+)/;
 
   /* ── 키워드 위치 탐색 ─────────────────────────────────────── */
 
@@ -33,20 +39,20 @@ const UserList = (() => {
     let m;
 
     // 대상 필드 (P, N, M)
-    const profRe = /Profile[-\s]+[A-Za-z0-9]{5,6}(?![A-Za-z0-9])/g;
+    const profRe = /Profile[- ]+[A-Za-z0-9]{5,6}(?![A-Za-z0-9])/g;
     while ((m = profRe.exec(text)) !== null)
       positions.push({ type: 'P', pos: m.index });
 
-    const nameRe = /(?<!Channel)Name[-\s]+[\uAC00-\uD7A3a-zA-Z0-9]/g;
+    const nameRe = /(?<!Channel)Name[- ]+[\uAC00-\uD7A3a-zA-Z0-9]/g;
     while ((m = nameRe.exec(text)) !== null)
       positions.push({ type: 'N', pos: m.index });
 
-    const mapRe = /Map(?!Online)[-\s]{4,}/g;
+    const mapRe = /Map(?!Online)[- ]{4,}/g;
     while ((m = mapRe.exec(text)) !== null)
       positions.push({ type: 'M', pos: m.index });
 
     // 보조 키워드 — 블록 경계 감지용 (각 키워드를 고유 타입으로 등록)
-    const helperRe = /Created|Attacks|Buffs|CharOnline|Captcha|MapOnline|ChannelOnline/g;
+    const helperRe = /Created|Attacks|Buffs|CharOnline|Captcha|MapOnline|ChannelOnline|Level|Exp|Job/g;
     while ((m = helperRe.exec(text)) !== null)
       positions.push({ type: m[0], pos: m.index });
 
@@ -58,11 +64,22 @@ const UserList = (() => {
 
   function processPacket(text) {
     if (!text) return;
-    const sanitized = text.replace(/[^\uAC00-\uD7A3a-zA-Z0-9\s\n\r]/g, '-');
+    // 전처리: 줄바꿈·탭·넓은공백 등 제거(일반 스페이스만 유지) → 나머지 특수문자를 -로 치환
+    const cleaned = text.replace(/[^\S ]/g, '');
+    const sanitized = cleaned.replace(/[^\uAC00-\uD7A3a-zA-Z0-9 ]/g, '-');
+
+    const bufStart = bufferOffset + buffer.length;
+    rawChunks.push({ bufStart, bufLen: sanitized.length, raw: text });
     buffer += sanitized;
 
     if (buffer.length > 65536) {
-      buffer = buffer.slice(-65536);
+      const excess = buffer.length - 65536;
+      buffer = buffer.slice(excess);
+      bufferOffset += excess;
+      // 오래된 rawChunks 제거
+      while (rawChunks.length && rawChunks[0].bufStart + rawChunks[0].bufLen <= bufferOffset) {
+        rawChunks.shift();
+      }
     }
 
     const positions = findKeywordPositions(buffer);
@@ -75,13 +92,27 @@ const UserList = (() => {
 
     for (const kw of positions) {
       if (seen.has(kw.type)) {
-        // 블록 완성 여부 확인 (P, N, M 모두 존재)
-        if (seen.has('P') && seen.has('N') && seen.has('M')) {
+        const isValid = seen.has('P') && seen.has('N') && seen.has('M') && isBlockCompact(blockItems);
+        if (isValid) {
+          // 유효한 블록: 그대로 저장하고 새 블록은 kw 부터 시작
           blocks.push({ items: blockItems, endPos: kw.pos });
+          trimPos = kw.pos;
+          seen = new Set();
+          blockItems = [];
+        } else {
+          // 유효하지 않은 블록: kw와 가까운 항목들을 새 블록으로 이월
+          const tail = getCompactTail(blockItems, kw.pos);
+          trimPos = tail.length > 0 ? tail[0].pos : kw.pos;
+          seen = new Set();
+          blockItems = [];
+          for (const item of tail) {
+            // kw와 동일 타입은 kw 자체가 추가되므로 제외 (중복 방지)
+            if (!seen.has(item.type) && item.type !== kw.type) {
+              seen.add(item.type);
+              blockItems.push(item);
+            }
+          }
         }
-        trimPos = kw.pos;
-        seen = new Set();
-        blockItems = [];
       }
       seen.add(kw.type);
       blockItems.push(kw);
@@ -93,18 +124,70 @@ const UserList = (() => {
       if (user && !profileSet.has(user.profile)) {
         profileSet.add(user.profile);
         users.push(user);
+        const blockStart = block.items[0].pos;
+        debugBlocks.push({
+          profile: user.profile,
+          raw: getRawForRange(blockStart, block.endPos),
+          sanitized: buffer.substring(blockStart, block.endPos),
+        });
         changed = true;
       }
     }
 
     if (trimPos > 0) {
       buffer = buffer.substring(trimPos);
+      bufferOffset += trimPos;
+      while (rawChunks.length && rawChunks[0].bufStart + rawChunks[0].bufLen <= bufferOffset) {
+        rawChunks.shift();
+      }
     }
 
     if (changed) {
       document.getElementById('userlist-count').textContent = String(users.length);
       render();
     }
+  }
+
+  function isBlockCompact(items) {
+    for (let i = 1; i < items.length; i++) {
+      if (items[i].pos - items[i - 1].pos > MAX_KEYWORD_GAP) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * kw.pos 에서 거꾸로 items를 탐색하여 MAX_KEYWORD_GAP 이내로 연속된
+   * 항목들을 반환한다. 유효하지 않은 블록이 감지됐을 때 새 블록의 시작
+   * 후보를 구출하는 데 사용한다.
+   */
+  function getCompactTail(items, kwPos) {
+    let prevPos = kwPos;
+    let start = items.length;
+    for (let i = items.length - 1; i >= 0; i--) {
+      if (prevPos - items[i].pos <= MAX_KEYWORD_GAP) {
+        start = i;
+        prevPos = items[i].pos;
+      } else {
+        break;
+      }
+    }
+    return items.slice(start);
+  }
+
+  function getRawForRange(start, end) {
+    // buffer 내 [start, end) 범위에 해당하는 원본 텍스트를 rawChunks에서 합산
+    const absStart = bufferOffset + start;
+    const absEnd = bufferOffset + end;
+    let result = '';
+    for (const chunk of rawChunks) {
+      const cEnd = chunk.bufStart + chunk.bufLen;
+      if (cEnd <= absStart) continue;
+      if (chunk.bufStart >= absEnd) break;
+      result += chunk.raw;
+    }
+    return result;
   }
 
   function extractFromBlock(items, endPos) {
@@ -133,12 +216,7 @@ const UserList = (() => {
       const mapSub = blockText.substring(mapItem.pos - blockStart);
       const mapMatch = MAP_VAL_RE.exec(mapSub);
       if (mapMatch) {
-        const cleaned = mapMatch[1]
-          .replace(/-+/g, ' ')
-          .replace(/\s+/g, ' ')
-          .trim();
-        const mapRun = cleaned.match(/([\uAC00-\uD7A3][\uAC00-\uD7A3a-zA-Z0-9 ]*)/);
-        if (mapRun) map = mapRun[1].trim();
+        map = mapMatch[1].trim() || null;
       }
     }
 
@@ -203,7 +281,10 @@ const UserList = (() => {
 
   function clear() {
     buffer = '';
+    rawChunks.length = 0;
+    bufferOffset = 0;
     users.length = 0;
+    debugBlocks.length = 0;
     profileSet.clear();
     sortKey = null;
     sortAsc = true;
@@ -245,5 +326,25 @@ const UserList = (() => {
     UserDB.saveEntries(data);
   }
 
-  return { init, open, close, clear, processPacket, saveToUserDB };
+  function openDebug() {
+    document.getElementById('userlist-debug-modal').classList.remove('hidden');
+    if (!debugBlocks.length) {
+      document.getElementById('debug-raw').textContent = '(데이터 없음)';
+      document.getElementById('debug-sanitized').textContent = '(데이터 없음)';
+      return;
+    }
+    const divider = '\n' + '='.repeat(60) + '\n';
+    document.getElementById('debug-raw').textContent = debugBlocks
+      .map((b, i) => `[${i + 1}] ${b.profile}\n${b.raw}`)
+      .join(divider);
+    document.getElementById('debug-sanitized').textContent = debugBlocks
+      .map((b, i) => `[${i + 1}] ${b.profile}\n${b.sanitized}`)
+      .join(divider);
+  }
+
+  function closeDebug() {
+    document.getElementById('userlist-debug-modal').classList.add('hidden');
+  }
+
+  return { init, open, close, clear, processPacket, saveToUserDB, openDebug, closeDebug };
 })();

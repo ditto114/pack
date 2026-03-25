@@ -41,6 +41,11 @@ class UpdateFieldRequest(BaseModel):
     value: str
 
 
+class SaveFriendListRequest(BaseModel):
+    search_code: str
+    friend_codes: list[str]
+
+
 @router.get("")
 def get_all() -> list[dict[str, Any]]:
     return get_user_db_entries()
@@ -99,6 +104,51 @@ def update_field(profile_code: str, body: UpdateFieldRequest) -> dict[str, Any]:
         return {"status": "error", "error": f"허용되지 않는 필드: {body.field}"}
     update_user_db_field(profile_code, body.field, body.value)
     return {"status": "ok"}
+
+
+@router.post("/save-friend-list")
+def save_friend_list(body: SaveFriendListRequest) -> dict[str, Any]:
+    """양방향 친구목록 저장 (중복 방지)."""
+    search_code = body.search_code.strip()
+    friend_codes = [c.strip() for c in body.friend_codes if c.strip()]
+    if not search_code or not friend_codes:
+        return {"status": "empty"}
+
+    existing_rows = get_user_db_entries()
+    existing_map = {r["profile_code"]: r for r in existing_rows if r.get("profile_code")}
+
+    def parse_list(val: str) -> list[str]:
+        return [s.strip() for s in (val or "").split(",") if s.strip()]
+
+    def merge_unique(existing_val: str, new_codes: list[str]) -> str:
+        current = parse_list(existing_val)
+        seen = set(current)
+        for c in new_codes:
+            if c not in seen:
+                seen.add(c)
+                current.append(c)
+        return ",".join(current)
+
+    updated = 0
+
+    # 1) 검색 대상의 friend_list에 모든 친구 코드 추가
+    if search_code in existing_map:
+        old_val = existing_map[search_code].get("friend_list", "")
+        new_val = merge_unique(old_val, friend_codes)
+        if new_val != old_val:
+            update_user_db_field(search_code, "friend_list", new_val)
+            updated += 1
+
+    # 2) 검색된 각 친구의 friend_list에 검색 대상 코드 추가
+    for fc in friend_codes:
+        if fc in existing_map:
+            old_val = existing_map[fc].get("friend_list", "")
+            new_val = merge_unique(old_val, [search_code])
+            if new_val != old_val:
+                update_user_db_field(fc, "friend_list", new_val)
+                updated += 1
+
+    return {"status": "ok", "updated": updated}
 
 
 @router.delete("/{profile_code}")

@@ -17,6 +17,8 @@ const World = (() => {
   let currentExpTab = 'world';
   let dragSrcIdx = -1;
   let ctxMenu = null;
+  const expDebugWorldBlocks = [];
+  const expDebugChannelBlocks = [];
 
   function init() {
     document.getElementById('world-tbody').addEventListener('click', onRowClick);
@@ -161,14 +163,19 @@ const World = (() => {
     experimentIdSet.clear();
     experimentChannels.length = 0;
     experimentChannelSet.clear();
+    expDebugWorldBlocks.length = 0;
+    expDebugChannelBlocks.length = 0;
     document.getElementById('experiment-tbody').innerHTML = '';
     document.getElementById('experiment-ch-tbody').innerHTML = '';
   }
 
-  function processPacketForExperiment(text) {
-    if (!text) return;
+  function processPacketForExperiment(rawText) {
+    if (!rawText) return;
+    // 전처리: 줄바꿈·탭·넓은공백 등 제거 (일반 스페이스만 유지)
+    const text = rawText.replace(/[^\S ]/g, '');
     let worldChanged = false;
     let channelChanged = false;
+    const CTX = 40; // 매치 전후 컨텍스트 길이
 
     WORLD_ID_RE.lastIndex = 0;
     let match;
@@ -177,6 +184,13 @@ const World = (() => {
       if (id.length === 17 && !experimentIdSet.has(id)) {
         experimentIdSet.add(id);
         experimentIds.push(id);
+        const start = Math.max(0, match.index - CTX);
+        const end = Math.min(text.length, match.index + match[0].length + CTX);
+        expDebugWorldBlocks.push({
+          value: id,
+          raw: rawText,
+          sanitized: text.substring(start, end),
+        });
         worldChanged = true;
       }
     }
@@ -188,6 +202,13 @@ const World = (() => {
       if (!experimentChannelSet.has(normalized)) {
         experimentChannelSet.add(normalized);
         experimentChannels.push(normalized);
+        const start = Math.max(0, match.index - CTX);
+        const end = Math.min(text.length, match.index + match[0].length + CTX);
+        expDebugChannelBlocks.push({
+          value: normalized,
+          raw: rawText,
+          sanitized: text.substring(start, end),
+        });
         channelChanged = true;
       }
     }
@@ -350,9 +371,29 @@ const World = (() => {
     alert(`${count}건의 데이터가 월드 매칭 테이블에 반영되었습니다. '저장' 버튼을 눌러 DB에 영구 저장하세요.`);
   }
 
+  function openExpDebug() {
+    document.getElementById('exp-debug-modal').classList.remove('hidden');
+    const divider = '\n' + '='.repeat(60) + '\n';
+    document.getElementById('exp-debug-world').textContent = expDebugWorldBlocks.length
+      ? expDebugWorldBlocks.map((b, i) =>
+          `[${i + 1}] ${b.value}\n[원본]\n${b.raw}\n[전처리 후 컨텍스트]\n${b.sanitized}`
+        ).join(divider)
+      : '(데이터 없음)';
+    document.getElementById('exp-debug-channel').textContent = expDebugChannelBlocks.length
+      ? expDebugChannelBlocks.map((b, i) =>
+          `[${i + 1}] ${b.value}\n[원본]\n${b.raw}\n[전처리 후 컨텍스트]\n${b.sanitized}`
+        ).join(divider)
+      : '(데이터 없음)';
+  }
+
+  function closeExpDebug() {
+    document.getElementById('exp-debug-modal').classList.add('hidden');
+  }
+
   return {
     init, load, toggleOrder, save, clear, getChannelName,
     openExperiment, closeExperiment, switchExpTab, clearExperiment,
     processPacketForExperiment, saveExpToWorldMatch,
+    openExpDebug, closeExpDebug,
   };
 })();

@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LAKE - CRM Dashboard</title>
-  <link rel="stylesheet" href="/css/style.css?v=16">
+  <link rel="stylesheet" href="/css/style.css?v=22">
 </head>
 <body>
   <div id="app">
@@ -39,10 +39,10 @@
       <button id="btn-start" onclick="App.startCapture()">캡쳐 시작</button>
       <button id="btn-stop" onclick="App.stopCapture()" disabled>캡쳐 중지</button>
       <button id="btn-packet" onclick="App.togglePacketModal()">패킷 읽기</button>
-      <button id="btn-ppsn" onclick="App.togglePpsn()">프로필 검색</button>
       <button id="btn-world" onclick="App.toggleWorld()">월드 매칭</button>
       <button id="btn-friend" onclick="App.toggleFriend()">친구검색</button>
       <button id="btn-userlist" onclick="UserList.open()">유저리스트</button>
+      <button onclick="Monitor.open()">채널 모니터</button>
     </div>
 
     <!-- 메인 영역 -->
@@ -51,7 +51,8 @@
       <div id="userdb-section">
         <div id="userdb-header">
           <span>유저 DB (<span id="userdb-count">0</span>명)</span>
-          <input type="text" id="userdb-search" placeholder="검색..." style="margin-left:auto;width:140px" oninput="UserDB.setFilter(this.value)">
+          <button id="btn-common-friends" onclick="UserDB.findCommonFriends()" title="선택된 행들의 공통 친구를 빈도순으로 표시">겹지인찾기</button>
+          <input type="text" id="userdb-search" placeholder="검색..." style="margin-left:auto;width:140px" onkeydown="if(event.key==='Enter') UserDB.setFilter(this.value)">
           <button onclick="UserDB.deduplicate()">중복프로필 제거</button>
           <button onclick="UserDB.clearAll()">초기화</button>
         </div>
@@ -64,8 +65,9 @@
                 <th>메월닉</th>
                 <th>길드</th>
                 <th>주 사냥터</th>
-                <th>PPSN</th>
+                <th>메모</th>
                 <th>친구목록</th>
+                <th>PPSN</th>
               </tr>
             </thead>
             <tbody id="userdb-tbody"></tbody>
@@ -161,9 +163,10 @@
       <div id="friend-panel" class="side-panel hidden">
         <h3>친구 검색</h3>
         <div class="friend-input">
-          <label>프로필 코드 (5~6글자)</label>
-          <input type="text" id="friend-code" maxlength="6">
-          <button id="friend-search-btn" onclick="Friends.search()">검색</button>
+          <label>프로필 코드</label>
+          <input type="text" id="friend-code" placeholder="예: ABC12 또는 ABC12, DEF34">
+          <button id="friend-search-btn" onclick="Friends.search()">친구</button>
+          <button id="friend-self-btn" onclick="Friends.searchSelf()">본인</button>
           <button id="friend-stop-btn" onclick="Friends.stop()" disabled>중지</button>
         </div>
         <div id="friend-status">프로필 코드를 입력하고 검색을 시작하세요.</div>
@@ -188,7 +191,7 @@
         <div class="panel-actions">
           <button onclick="Friends.saveToUserDB()">유저 DB에 저장</button>
           <button onclick="Friends.saveFriendList()">친구목록 저장</button>
-          <button onclick="MultiSearch.open()">다중 검색</button>
+          <button onclick="MultiSearch.open()">2촌 검색</button>
         </div>
       </div>
     </div>
@@ -256,11 +259,84 @@
       </div>
     </div>
 
-    <!-- 다중 검색 모달 -->
+    <!-- 겹지인찾기 모달 -->
+    <div id="common-friends-modal" class="modal hidden">
+      <div class="modal-content common-friends-modal-content">
+        <div class="modal-header">
+          <h3 id="cf-title">겹지인찾기</h3>
+          <button class="close-btn" onclick="UserDB.closeCommonFriendsModal()">&times;</button>
+        </div>
+        <div id="cf-info">선택된 유저들의 친구목록에서 가장 많이 겹치는 프로필 코드 순서로 표시합니다.</div>
+        <div id="cf-table-wrap">
+          <table id="cf-table">
+            <thead>
+              <tr>
+                <th style="width:40px;text-align:center">#</th>
+                <th>프로필 코드</th>
+                <th>인겜닉</th>
+                <th>길드</th>
+                <th>메모</th>
+                <th>겹친 수</th>
+              </tr>
+            </thead>
+            <tbody id="cf-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- 채널 모니터 모달 -->
+    <div id="monitor-modal" class="modal hidden">
+      <div class="modal-content monitor-modal-content">
+        <div class="modal-header">
+          <h3>채널 모니터</h3>
+          <button class="close-btn" onclick="Monitor.close()">&times;</button>
+        </div>
+        <div class="monitor-input-row">
+          <label>PPSN</label>
+          <input type="text" id="monitor-ppsn" placeholder="예: 20372100005861109" style="width:180px">
+          <label>갱신 간격 (초)</label>
+          <input type="number" id="monitor-interval" value="5" min="3" step="1" style="width:55px">
+          <button id="monitor-start-btn" onclick="Monitor.start()">시작</button>
+          <button id="monitor-stop-btn" onclick="Monitor.stop()" disabled>중지</button>
+        </div>
+        <div id="monitor-status" class="monitor-status"></div>
+        <div class="monitor-body">
+          <div class="monitor-log-panel">
+            <div class="monitor-panel-title">
+              변경 로그
+            </div>
+            <div id="monitor-log" class="monitor-log"></div>
+          </div>
+          <div class="monitor-table-panel">
+            <div class="monitor-panel-title">
+              친구 목록 — 온라인 <span id="monitor-online-count" style="color:var(--success)">0</span>명
+              / 전체 <span id="monitor-total-count">0</span>명
+            </div>
+            <div id="monitor-table-wrap" class="monitor-table-wrap">
+              <table id="monitor-table">
+                <thead>
+                  <tr>
+                    <th>상태</th>
+                    <th>닉네임</th>
+                    <th>프로필 코드</th>
+                    <th>채널명</th>
+                    <th>채널 코드</th>
+                  </tr>
+                </thead>
+                <tbody id="monitor-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2촌 검색 모달 -->
     <div id="multi-search-modal" class="modal hidden">
       <div class="modal-content multi-search-modal-content">
         <div class="modal-header">
-          <h3>다중 검색</h3>
+          <h3>2촌 검색</h3>
           <button class="close-btn" onclick="MultiSearch.close()">&times;</button>
         </div>
         <div class="ms-input-row">
@@ -316,50 +392,16 @@
       </div>
     </div>
 
-    <!-- 프로필 검색 모달 -->
-    <div id="ppsn-modal" class="modal hidden">
-      <div class="modal-content" style="width:640px">
-        <div class="modal-header">
-          <h3>프로필 검색</h3>
-          <button class="close-btn" onclick="App.togglePpsn()">&times;</button>
-        </div>
-        <div class="ppsn-form">
-          <label>프로필 코드 (5~6글자)</label>
-          <input type="text" id="ppsn-code" maxlength="6">
-          <label>요청 간 대기 (초)</label>
-          <input type="number" id="ppsn-delay" value="0.5" step="0.1" min="0">
-          <button id="ppsn-search-btn" onclick="PPSN.search()">프로필 검색</button>
-        </div>
-        <div id="ppsn-log-label" style="font-size:12px;color:var(--text-dim)">검색 로그</div>
-        <pre id="ppsn-log"></pre>
-        <div id="ppsn-result-wrap" style="overflow:auto;border:1px solid var(--border);border-radius:var(--radius)">
-          <table id="ppsn-result-table">
-            <thead>
-              <tr>
-                <th>상태</th>
-                <th>프로필 코드</th>
-                <th>채널명</th>
-                <th>인겜닉</th>
-                <th>월드명</th>
-                <th>메월닉</th>
-                <th>채널 코드</th>
-                <th>PPSN</th>
-              </tr>
-            </thead>
-            <tbody id="ppsn-result-tbody"></tbody>
-          </table>
-        </div>
-      </div>
-    </div>
   </div>
 
-  <script src="/js/ws.js?v=16"></script>
-  <script src="/js/packets.js?v=16"></script>
-  <script src="/js/friends.js?v=16"></script>
-  <script src="/js/world.js?v=16"></script>
-  <script src="/js/userlist.js?v=16"></script>
-  <script src="/js/userdb.js?v=16"></script>
-  <script src="/js/multi-search.js?v=16"></script>
-  <script src="/js/app.js?v=16"></script>
+  <script src="/js/ws.js?v=22"></script>
+  <script src="/js/packets.js?v=22"></script>
+  <script src="/js/friends.js?v=22"></script>
+  <script src="/js/world.js?v=22"></script>
+  <script src="/js/userlist.js?v=22"></script>
+  <script src="/js/userdb.js?v=22"></script>
+  <script src="/js/multi-search.js?v=22"></script>
+  <script src="/js/monitor.js?v=22"></script>
+  <script src="/js/app.js?v=22"></script>
 </body>
 </html>

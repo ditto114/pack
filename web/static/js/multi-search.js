@@ -1,5 +1,5 @@
 /**
- * 다중 검색 (1촌 → 2촌 자동 순회) 모달 로직
+ * 2촌 검색 (1촌 → 2촌 자동 순회) 모달 로직
  */
 const MultiSearch = (() => {
   let running = false;
@@ -25,7 +25,7 @@ const MultiSearch = (() => {
 
   // ── 검색 시작 ────────────────────────────────────────────────
   function search() {
-    if (running) return alert('다중 검색이 이미 진행 중입니다.');
+    if (running) return alert('2촌 검색이 이미 진행 중입니다.');
 
     const code = document.getElementById('ms-code').value.trim();
     if (!/^[A-Za-z0-9]{5,6}$/.test(code)) {

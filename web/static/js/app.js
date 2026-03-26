@@ -69,10 +69,6 @@ const App = (() => {
     document.getElementById('packet-modal').classList.toggle('hidden');
   }
 
-  function togglePpsn() {
-    document.getElementById('ppsn-modal').classList.toggle('hidden');
-  }
-
   function toggleWorld() {
     const panel = document.getElementById('world-panel');
     panel.classList.toggle('hidden');
@@ -90,5 +86,5 @@ const App = (() => {
   // init on load
   document.addEventListener('DOMContentLoaded', init);
 
-  return { startCapture, stopCapture, togglePacketModal, togglePpsn, toggleWorld, toggleFriend };
+  return { startCapture, stopCapture, togglePacketModal, toggleWorld, toggleFriend };
 })();

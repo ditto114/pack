@@ -19,7 +19,7 @@ from ..db import (
 
 router = APIRouter(prefix="/api/user-db", tags=["user-db"])
 
-ALLOWED_FIELDS = {"ingame_nick", "mw_nick", "guild", "main_map", "ppsn", "friend_list"}
+ALLOWED_FIELDS = {"ingame_nick", "mw_nick", "guild", "main_map", "memo", "ppsn", "friend_list"}
 
 
 class UpsertEntry(BaseModel):
@@ -28,6 +28,7 @@ class UpsertEntry(BaseModel):
     mw_nick: Optional[str] = None
     guild: Optional[str] = None
     main_map: Optional[str] = None
+    memo: Optional[str] = None
     ppsn: Optional[str] = None
     friend_list: Optional[str] = None
 
@@ -66,36 +67,44 @@ def deduplicate() -> dict[str, Any]:
 @router.post("/bulk-save")
 def bulk_save(body: BulkSaveRequest) -> dict[str, Any]:
     """부분 필드만 전달해도 기존 값을 보존하며 upsert."""
-    if not body.entries:
-        return {"status": "empty", "count": 0}
+    try:
+        if not body.entries:
+            return {"status": "empty", "count": 0}
 
-    # 기존 레코드 조회하여 병합
-    existing_rows = get_user_db_entries()
-    existing_map = {r["profile_code"]: r for r in existing_rows if r.get("profile_code")}
+        existing_rows = get_user_db_entries()
+        existing_map = {r["profile_code"]: r for r in existing_rows if r.get("profile_code")}
 
-    now = _now_iso()
-    rows: list[dict[str, Any]] = []
-    for e in body.entries:
-        if not e.profile_code:
-            continue
-        pc = e.profile_code.strip()
-        base = existing_map.get(pc, {})
-        row = {
-            "profile_code": pc,
-            "ingame_nick": e.ingame_nick if e.ingame_nick is not None else base.get("ingame_nick", ""),
-            "mw_nick": e.mw_nick if e.mw_nick is not None else base.get("mw_nick", ""),
-            "guild": e.guild if e.guild is not None else base.get("guild", ""),
-            "main_map": e.main_map if e.main_map is not None else base.get("main_map", ""),
-            "ppsn": e.ppsn if e.ppsn is not None else base.get("ppsn", ""),
-            "friend_list": e.friend_list if e.friend_list is not None else base.get("friend_list", ""),
-            "updated_at": now,
-        }
-        rows.append(row)
+        now = _now_iso()
+        seen_pcs: set[str] = set()
+        rows: list[dict[str, Any]] = []
+        for e in body.entries:
+            if not e.profile_code:
+                continue
+            pc = e.profile_code.strip()
+            if pc in seen_pcs:
+                continue  # 동일 profile_code 중복 → ON CONFLICT 오류 방지
+            seen_pcs.add(pc)
+            base = existing_map.get(pc, {})
+            row = {
+                "profile_code": pc,
+                "ingame_nick": e.ingame_nick if e.ingame_nick is not None else base.get("ingame_nick", ""),
+                "mw_nick": e.mw_nick if e.mw_nick is not None else base.get("mw_nick", ""),
+                "guild": e.guild if e.guild is not None else base.get("guild", ""),
+                "main_map": e.main_map if e.main_map is not None else base.get("main_map", ""),
+                "memo": e.memo if e.memo is not None else base.get("memo", ""),
+                "ppsn": e.ppsn if e.ppsn is not None else base.get("ppsn", ""),
+                "friend_list": e.friend_list if e.friend_list is not None else base.get("friend_list", ""),
+                "updated_at": now,
+            }
+            rows.append(row)
 
-    if not rows:
-        return {"status": "empty", "count": 0}
-    result = upsert_user_db_entries(rows)
-    return {"status": "saved", "count": len(result)}
+        if not rows:
+            return {"status": "empty", "count": 0}
+        result = upsert_user_db_entries(rows)
+        return {"status": "saved", "count": len(result)}
+
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
 
 
 @router.put("/{profile_code}")
@@ -108,47 +117,80 @@ def update_field(profile_code: str, body: UpdateFieldRequest) -> dict[str, Any]:
 
 @router.post("/save-friend-list")
 def save_friend_list(body: SaveFriendListRequest) -> dict[str, Any]:
-    """양방향 친구목록 저장 (중복 방지)."""
-    search_code = body.search_code.strip()
-    friend_codes = [c.strip() for c in body.friend_codes if c.strip()]
-    if not search_code or not friend_codes:
-        return {"status": "empty"}
+    """양방향 친구목록 저장 (중복 방지). 단일 배치 upsert로 처리."""
+    try:
+        search_code = body.search_code.strip()
+        friend_codes = [c.strip() for c in body.friend_codes if c.strip()]
+        if not search_code or not friend_codes:
+            return {"status": "empty"}
 
-    existing_rows = get_user_db_entries()
-    existing_map = {r["profile_code"]: r for r in existing_rows if r.get("profile_code")}
+        existing_rows = get_user_db_entries()
+        existing_map = {r["profile_code"]: r for r in existing_rows if r.get("profile_code")}
 
-    def parse_list(val: str) -> list[str]:
-        return [s.strip() for s in (val or "").split(",") if s.strip()]
+        def parse_list(val: str) -> list[str]:
+            return [s.strip() for s in (val or "").split(",") if s.strip()]
 
-    def merge_unique(existing_val: str, new_codes: list[str]) -> str:
-        current = parse_list(existing_val)
-        seen = set(current)
-        for c in new_codes:
-            if c not in seen:
-                seen.add(c)
-                current.append(c)
-        return ",".join(current)
+        def merge_unique(existing_val: str, new_codes: list[str]) -> str:
+            current = parse_list(existing_val)
+            seen = set(current)
+            for c in new_codes:
+                if c not in seen:
+                    seen.add(c)
+                    current.append(c)
+            return ",".join(current)
 
-    updated = 0
+        now = _now_iso()
+        rows_to_upsert: list[dict[str, Any]] = []
 
-    # 1) 검색 대상의 friend_list에 모든 친구 코드 추가
-    if search_code in existing_map:
-        old_val = existing_map[search_code].get("friend_list", "")
-        new_val = merge_unique(old_val, friend_codes)
-        if new_val != old_val:
-            update_user_db_field(search_code, "friend_list", new_val)
-            updated += 1
+        def to_upsert_row(existing: dict[str, Any]) -> dict[str, Any]:
+            """id(GENERATED ALWAYS) 컬럼을 제외한 upsert용 행 반환."""
+            row = dict(existing)
+            row.pop("id", None)
+            return row
 
-    # 2) 검색된 각 친구의 friend_list에 검색 대상 코드 추가
-    for fc in friend_codes:
-        if fc in existing_map:
-            old_val = existing_map[fc].get("friend_list", "")
-            new_val = merge_unique(old_val, [search_code])
+        # 1) 검색 대상의 friend_list에 모든 친구 코드 추가 (본인 제외)
+        if search_code in existing_map:
+            base = existing_map[search_code]
+            old_val = base.get("friend_list", "") or ""
+            new_val = merge_unique(old_val, [fc for fc in friend_codes if fc != search_code])
             if new_val != old_val:
-                update_user_db_field(fc, "friend_list", new_val)
-                updated += 1
+                row = to_upsert_row(base)
+                row["friend_list"] = new_val
+                row["updated_at"] = now
+                rows_to_upsert.append(row)
 
-    return {"status": "ok", "updated": updated}
+        # 2) 검색된 각 친구의 friend_list에 검색 대상 코드 추가
+        #    search_code 본인은 스킵 (본인 검색 결과가 friend_codes에 포함될 수 있음)
+        for fc in friend_codes:
+            if fc == search_code:
+                continue
+            if fc in existing_map:
+                base = existing_map[fc]
+                old_val = base.get("friend_list", "") or ""
+                new_val = merge_unique(old_val, [search_code])
+                if new_val != old_val:
+                    row = to_upsert_row(base)
+                    row["friend_list"] = new_val
+                    row["updated_at"] = now
+                    rows_to_upsert.append(row)
+
+        # 동일 profile_code가 두 번 들어가면 PostgreSQL upsert 오류 발생 → 중복 제거
+        seen_pcs: set[str] = set()
+        deduped: list[dict[str, Any]] = []
+        for row in rows_to_upsert:
+            pc = row["profile_code"]
+            if pc not in seen_pcs:
+                seen_pcs.add(pc)
+                deduped.append(row)
+        rows_to_upsert = deduped
+
+        if rows_to_upsert:
+            upsert_user_db_entries(rows_to_upsert)
+
+        return {"status": "ok", "updated": len(rows_to_upsert)}
+
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
 
 
 @router.delete("/{profile_code}")

@@ -16,6 +16,7 @@ from starlette.responses import Response
 from .routes.packets import router as packets_router, ws_router as packets_ws
 from .routes.friends import router as friends_router, ws_router as friends_ws
 from .routes.world_match import router as world_match_router, ws_router as world_match_ws
+from .routes.monitor import ws_router as monitor_ws
 from .routes.settings import router as settings_router
 from .routes.user_db import router as user_db_router
 
@@ -45,6 +46,7 @@ app.include_router(user_db_router)
 app.include_router(packets_ws)
 app.include_router(friends_ws)
 app.include_router(world_match_ws)
+app.include_router(monitor_ws)
 
 # Static files (HTML/CSS/JS)
 static_dir = Path(__file__).resolve().parent / "static"

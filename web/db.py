@@ -192,13 +192,16 @@ def get_user_db_entries() -> list[dict[str, Any]]:
     return all_rows
 
 
-def upsert_user_db_entries(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def upsert_user_db_entries(rows: list[dict[str, Any]], batch_size: int = 100) -> list[dict[str, Any]]:
     if not rows:
         return []
-    resp = get_client().table("user_db").upsert(
-        rows, on_conflict="profile_code"
-    ).execute()
-    return resp.data or []
+    client = get_client()
+    result: list[dict[str, Any]] = []
+    for i in range(0, len(rows), batch_size):
+        batch = rows[i:i + batch_size]
+        resp = client.table("user_db").upsert(batch, on_conflict="profile_code").execute()
+        result.extend(resp.data or [])
+    return result
 
 
 def update_user_db_field(profile_code: str, field: str, value: str) -> Optional[dict[str, Any]]:

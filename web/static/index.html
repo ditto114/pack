@@ -1,11 +1,13 @@
 <!DOCTYPE html>
 <html lang="ko">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>LAKE - CRM Dashboard</title>
+  <title> 1203EH CRM Dashboard</title>
   <link rel="stylesheet" href="/css/style.css?v=22">
 </head>
+
 <body>
   <div id="app">
     <!-- 필터 패널 -->
@@ -51,8 +53,10 @@
       <div id="userdb-section">
         <div id="userdb-header">
           <span>유저 DB (<span id="userdb-count">0</span>명)</span>
-          <button id="btn-common-friends" onclick="UserDB.findCommonFriends()" title="선택된 행들의 공통 친구를 빈도순으로 표시">겹지인찾기</button>
-          <input type="text" id="userdb-search" placeholder="검색..." style="margin-left:auto;width:140px" onkeydown="if(event.key==='Enter') UserDB.setFilter(this.value)">
+          <button id="btn-common-friends" onclick="UserDB.findCommonFriends()"
+            title="선택된 행들의 공통 친구를 빈도순으로 표시">겹지인찾기</button>
+          <input type="text" id="userdb-search" placeholder="검색..." style="margin-left:auto;width:140px"
+            onkeydown="if(event.key==='Enter') UserDB.setFilter(this.value)">
           <button onclick="UserDB.deduplicate()">중복프로필 제거</button>
           <button onclick="UserDB.clearAll()">초기화</button>
         </div>
@@ -112,7 +116,12 @@
               <table id="experiment-table">
                 <thead>
                   <tr>
-                    <th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th>
+                    <th>1</th>
+                    <th>2</th>
+                    <th>3</th>
+                    <th>4</th>
+                    <th>5</th>
+                    <th>6</th>
                   </tr>
                 </thead>
                 <tbody id="experiment-tbody"></tbody>
@@ -124,7 +133,12 @@
               <table id="experiment-ch-table">
                 <thead>
                   <tr>
-                    <th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th>
+                    <th>1</th>
+                    <th>2</th>
+                    <th>3</th>
+                    <th>4</th>
+                    <th>5</th>
+                    <th>6</th>
                   </tr>
                 </thead>
                 <tbody id="experiment-ch-tbody"></tbody>
@@ -149,11 +163,13 @@
           <div style="display:flex;gap:12px;height:60vh">
             <div style="flex:1;display:flex;flex-direction:column;min-width:0">
               <h4 style="margin:0 0 6px">WorldId 매치 원본</h4>
-              <pre id="exp-debug-world" style="flex:1;overflow:auto;border:1px solid var(--border);border-radius:var(--radius);padding:8px;margin:0;white-space:pre-wrap;word-break:break-all;font-size:12px"></pre>
+              <pre id="exp-debug-world"
+                style="flex:1;overflow:auto;border:1px solid var(--border);border-radius:var(--radius);padding:8px;margin:0;white-space:pre-wrap;word-break:break-all;font-size:12px"></pre>
             </div>
             <div style="flex:1;display:flex;flex-direction:column;min-width:0">
               <h4 style="margin:0 0 6px">ChannelName 매치 ���본</h4>
-              <pre id="exp-debug-channel" style="flex:1;overflow:auto;border:1px solid var(--border);border-radius:var(--radius);padding:8px;margin:0;white-space:pre-wrap;word-break:break-all;font-size:12px"></pre>
+              <pre id="exp-debug-channel"
+                style="flex:1;overflow:auto;border:1px solid var(--border);border-radius:var(--radius);padding:8px;margin:0;white-space:pre-wrap;word-break:break-all;font-size:12px"></pre>
             </div>
           </div>
         </div>
@@ -207,6 +223,7 @@
           <button onclick="Packets.exportAll()">TXT로 내보내기</button>
           <label><input type="checkbox" id="auto-scroll" checked> 자동 스크롤</label>
         </div>
+        <div id="packet-tabs"></div>
         <pre id="packet-output">캡쳐를 시작하면 패킷이 여기에 표시됩니다.</pre>
       </div>
     </div>
@@ -249,11 +266,13 @@
         <div style="display:flex;gap:12px;height:60vh">
           <div style="flex:1;display:flex;flex-direction:column;min-width:0">
             <h4 style="margin:0 0 6px">패킷 원본</h4>
-            <pre id="debug-raw" style="flex:1;overflow:auto;border:1px solid var(--border);border-radius:var(--radius);padding:8px;margin:0;white-space:pre-wrap;word-break:break-all;font-size:12px"></pre>
+            <pre id="debug-raw"
+              style="flex:1;overflow:auto;border:1px solid var(--border);border-radius:var(--radius);padding:8px;margin:0;white-space:pre-wrap;word-break:break-all;font-size:12px"></pre>
           </div>
           <div style="flex:1;display:flex;flex-direction:column;min-width:0">
             <h4 style="margin:0 0 6px">전처리 후</h4>
-            <pre id="debug-sanitized" style="flex:1;overflow:auto;border:1px solid var(--border);border-radius:var(--radius);padding:8px;margin:0;white-space:pre-wrap;word-break:break-all;font-size:12px"></pre>
+            <pre id="debug-sanitized"
+              style="flex:1;overflow:auto;border:1px solid var(--border);border-radius:var(--radius);padding:8px;margin:0;white-space:pre-wrap;word-break:break-all;font-size:12px"></pre>
           </div>
         </div>
       </div>
@@ -404,4 +423,5 @@
   <script src="/js/monitor.js?v=22"></script>
   <script src="/js/app.js?v=22"></script>
 </body>
+
 </html>

@@ -10,6 +10,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+import psutil
+
 from scapy.all import (  # type: ignore
     AsyncSniffer,
     Ether,
@@ -45,6 +47,10 @@ class PacketCaptureService:
         self._db_buffer: list[dict[str, Any]] = []
         self._db_lock = threading.Lock()
         self._flush_task: Optional[asyncio.Task] = None
+        # PID-based client identification
+        self._port_pid_cache: dict[int, Optional[int]] = {}
+        self._pid_client_map: dict[int, int] = {}
+        self._client_counter = 0
 
     @property
     def is_running(self) -> bool:
@@ -77,6 +83,9 @@ class PacketCaptureService:
         self.packet_list.clear()
         self.packet_counter = 0
         self.stop_event.clear()
+        self._port_pid_cache.clear()
+        self._pid_client_map.clear()
+        self._client_counter = 0
 
         self.sniffer = AsyncSniffer(
             store=False,
@@ -158,6 +167,8 @@ class PacketCaptureService:
         payload = self._extract_payload_bytes(packet)
         summary = packet.summary()
         direction = self._determine_direction(packet)
+        local_port = self._extract_local_port(packet, direction)
+        client_id, client_pid = self._resolve_client(local_port)
         utf8_text = None
         if payload:
             try:
@@ -194,6 +205,8 @@ class PacketCaptureService:
             "captured_at": captured_at,
             "utf8_text": (utf8_text or "")[:2000],
             "payload_hex": payload.hex() if payload else None,
+            "client_id": client_id,
+            "client_pid": client_pid,
         }
         try:
             self._ws_queue.put_nowait(ws_data)
@@ -209,6 +222,8 @@ class PacketCaptureService:
             "preview": preview,
             "utf8_text": (utf8_text or "")[:4000],
             "payload_hex": payload.hex() if payload else None,
+            "client_id": client_id,
+            "client_pid": client_pid,
         }
         with self._db_lock:
             self._db_buffer.append(db_row)
@@ -317,6 +332,62 @@ class PacketCaptureService:
         if src in self.local_addresses and dst in self.local_addresses:
             return "internal"
         return "unknown"
+
+    def _extract_local_port(self, packet: Any, direction: str) -> Optional[int]:
+        """패킷에서 로컬 측 포트를 추출한다.
+
+        outgoing → src port, incoming → dst port.
+        """
+        sport = dport = None
+        if TCP in packet:
+            sport, dport = packet[TCP].sport, packet[TCP].dport
+        elif UDP in packet:
+            sport, dport = packet[UDP].sport, packet[UDP].dport
+        if sport is None:
+            return None
+        if direction == "outgoing":
+            return sport
+        if direction == "incoming":
+            return dport
+        # internal / unknown: src 기본
+        return sport
+
+    def _resolve_client(
+        self, local_port: Optional[int]
+    ) -> tuple[Optional[int], Optional[int]]:
+        """로컬 포트로부터 (client_id, pid)를 반환한다.
+
+        새 포트가 발견되면 psutil로 PID를 조회하고 캐싱한다.
+        같은 PID면 포트가 바뀌어도 동일한 client_id를 유지한다.
+        """
+        if local_port is None:
+            return None, None
+
+        # 포트 → PID 캐시 조회, 없으면 psutil로 조회
+        if local_port not in self._port_pid_cache:
+            self._port_pid_cache[local_port] = self._lookup_pid_by_port(local_port)
+
+        pid = self._port_pid_cache[local_port]
+        if pid is None:
+            return None, None
+
+        # PID → 클라이언트 번호 매핑
+        if pid not in self._pid_client_map:
+            self._client_counter += 1
+            self._pid_client_map[pid] = self._client_counter
+
+        return self._pid_client_map[pid], pid
+
+    @staticmethod
+    def _lookup_pid_by_port(port: int) -> Optional[int]:
+        """psutil로 로컬 포트를 소유한 프로세스의 PID를 조회한다."""
+        try:
+            for conn in psutil.net_connections(kind="inet"):
+                if conn.laddr and conn.laddr.port == port and conn.pid:
+                    return conn.pid
+        except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+            pass
+        return None
 
     @staticmethod
     def _normalize_ip(addr: str) -> str:

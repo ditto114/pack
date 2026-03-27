@@ -209,6 +209,26 @@ button.primary:hover:not(:disabled) {
   font-size: 12px;
   cursor: pointer;
 }
+#packet-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+#packet-tabs:empty { display: none; }
+.packet-tab {
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius) var(--radius) 0 0;
+  background: var(--surface);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 12px;
+}
+.packet-tab.active {
+  background: var(--surface2);
+  border-bottom-color: var(--surface2);
+  color: var(--accent);
+}
 #packet-output {
   flex: 1;
   overflow: auto;

@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs ls:*)",
+      "Bash(find /c/Users/utor9/Desktop/pack -name *schema* -o -name *migration* -o -name *sql*)",
+      "Bash(pip show:*)"
+    ]
+  }
+}

@@ -1,8 +1,13 @@
 /**
- * 패킷 캡쳐 UI 로직 — 단일 텍스트 출력 방식
+ * 패킷 캡쳐 UI 로직 — 클라이언트(PID) 별 탭 분리
  */
 const Packets = (() => {
-  const packetData = [];
+  /** client_id(number|null) → packet[] */
+  const packetsByClient = new Map();
+  /** client_id → { pid } */
+  const clientInfo = new Map();
+  /** 현재 선택된 탭 (client_id, null 이면 "전체") */
+  let activeClient = null;
 
   function init() {
     document.getElementById('filter-text').addEventListener('input', refreshOutput);
@@ -10,13 +15,76 @@ const Packets = (() => {
   }
 
   function addPacket(data) {
-    packetData.push(data);
-    const max = parseInt(document.getElementById('filter-max').value) || 500;
-    while (packetData.length > max) packetData.shift();
+    const cid = data.client_id ?? null;
 
-    if (matchesFilter(data)) {
-      appendToOutput(data);
+    // "전체" 목록에 추가
+    if (!packetsByClient.has(null)) packetsByClient.set(null, []);
+    packetsByClient.get(null).push(data);
+
+    // 클라이언트별 목록에 추가
+    if (cid !== null) {
+      const isNew = !packetsByClient.has(cid);
+      if (isNew) {
+        packetsByClient.set(cid, []);
+        clientInfo.set(cid, { pid: data.client_pid });
+        renderTabs();
+      }
+      packetsByClient.get(cid).push(data);
     }
+
+    // max 제한
+    const max = parseInt(document.getElementById('filter-max').value) || 500;
+    for (const [, arr] of packetsByClient) {
+      while (arr.length > max) arr.shift();
+    }
+
+    // 활성 탭에 해당하는 패킷이면 출력
+    if (activeClient === null || activeClient === cid) {
+      if (matchesFilter(data)) {
+        appendToOutput(data);
+      }
+    }
+  }
+
+  function renderTabs() {
+    const container = document.getElementById('packet-tabs');
+    container.innerHTML = '';
+
+    // 클라이언트가 1개뿐이면 탭을 표시하지 않음
+    const clients = [...packetsByClient.keys()].filter(k => k !== null);
+    if (clients.length <= 1) return;
+
+    // "전체" 탭
+    container.appendChild(createTabButton('전체', null));
+
+    // 클라이언트별 탭 (번호 순)
+    clients.sort((a, b) => a - b);
+    for (const cid of clients) {
+      const info = clientInfo.get(cid);
+      const label = `클라이언트 ${cid} (PID: ${info?.pid ?? '?'})`;
+      container.appendChild(createTabButton(label, cid));
+    }
+  }
+
+  function createTabButton(label, cid) {
+    const btn = document.createElement('button');
+    btn.className = 'packet-tab' + (activeClient === cid ? ' active' : '');
+    btn.textContent = label;
+    btn.addEventListener('click', () => switchTab(cid));
+    return btn;
+  }
+
+  function switchTab(cid) {
+    activeClient = cid;
+    // 탭 active 상태 갱신
+    const container = document.getElementById('packet-tabs');
+    const clients = [null, ...[...packetsByClient.keys()].filter(k => k !== null).sort((a, b) => a - b)];
+    const tabs = [...container.children];
+    const idx = clients.indexOf(cid);
+    for (let i = 0; i < tabs.length; i++) {
+      tabs[i].classList.toggle('active', i === idx);
+    }
+    refreshOutput();
   }
 
   function formatPacket(pkt) {
@@ -25,13 +93,11 @@ const Packets = (() => {
 
   function appendToOutput(pkt) {
     const el = document.getElementById('packet-output');
-    // 첫 패킷이면 placeholder 제거
-    if (packetData.length === 1 || el.textContent === '캡쳐를 시작하면 패킷이 여기에 표시됩니다.') {
+    if (el.textContent === '캡쳐를 시작하면 패킷이 여기에 표시됩니다.') {
       el.textContent = '';
     }
     el.textContent += formatPacket(pkt);
 
-    // 자동 스크롤
     const autoScroll = document.getElementById('auto-scroll');
     if (autoScroll && autoScroll.checked) {
       el.scrollTop = el.scrollHeight;
@@ -40,7 +106,8 @@ const Packets = (() => {
 
   function refreshOutput() {
     const el = document.getElementById('packet-output');
-    const filtered = packetData.filter(matchesFilter);
+    const packets = packetsByClient.get(activeClient) || [];
+    const filtered = packets.filter(matchesFilter);
     if (filtered.length === 0) {
       el.textContent = '캡쳐를 시작하면 패킷이 여기에 표시됩니다.';
       return;
@@ -72,17 +139,21 @@ const Packets = (() => {
       alert('내보낼 패킷 데이터가 없습니다.');
       return;
     }
+    const suffix = activeClient !== null ? `_client${activeClient}` : '';
     const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `packets_${Date.now()}.txt`;
+    a.download = `packets${suffix}_${Date.now()}.txt`;
     a.click();
     URL.revokeObjectURL(url);
   }
 
   function clear() {
-    packetData.length = 0;
+    packetsByClient.clear();
+    clientInfo.clear();
+    activeClient = null;
+    document.getElementById('packet-tabs').innerHTML = '';
     document.getElementById('packet-output').textContent = '캡쳐를 시작하면 패킷이 여기에 표시됩니다.';
   }
 

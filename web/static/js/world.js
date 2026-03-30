@@ -274,6 +274,14 @@ const World = (() => {
     ctxMenu.style.left = e.clientX + 'px';
     ctxMenu.style.top = e.clientY + 'px';
 
+    const dupBtn = document.createElement('div');
+    dupBtn.textContent = '복제';
+    dupBtn.addEventListener('click', () => {
+      duplicateGridItem(gridId, idx);
+      closeCtxMenu();
+    });
+    ctxMenu.appendChild(dupBtn);
+
     const delBtn = document.createElement('div');
     delBtn.textContent = '삭제';
     delBtn.addEventListener('click', () => {
@@ -291,6 +299,22 @@ const World = (() => {
     if (ctxMenu) {
       ctxMenu.remove();
       ctxMenu = null;
+    }
+  }
+
+  function duplicateGridItem(gridId, idx) {
+    if (gridId === 'experiment-tbody') {
+      const value = experimentIds[idx];
+      if (value !== undefined) {
+        experimentIds.splice(idx + 1, 0, value);
+        renderGrid('experiment-tbody', experimentIds);
+      }
+    } else if (gridId === 'experiment-ch-tbody') {
+      const value = experimentChannels[idx];
+      if (value !== undefined) {
+        experimentChannels.splice(idx + 1, 0, value);
+        renderGrid('experiment-ch-tbody', experimentChannels);
+      }
     }
   }
 

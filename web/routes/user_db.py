@@ -85,9 +85,23 @@ def bulk_save(body: BulkSaveRequest) -> dict[str, Any]:
                 continue  # 동일 profile_code 중복 → ON CONFLICT 오류 방지
             seen_pcs.add(pc)
             base = existing_map.get(pc, {})
+            # ingame_nick: 기존 태그와 병합 (중복 제거, 최대 3개)
+            if e.ingame_nick is not None:
+                existing_tags = [t.strip() for t in (base.get("ingame_nick") or "").split(",") if t.strip()]
+                new_tags = [t.strip() for t in e.ingame_nick.split(",") if t.strip()]
+                merged = list(existing_tags)
+                seen = set(t.lower() for t in merged)
+                for t in new_tags:
+                    if t.lower() not in seen and len(merged) < 3:
+                        merged.append(t)
+                        seen.add(t.lower())
+                ingame_nick_val = ",".join(merged)
+            else:
+                ingame_nick_val = base.get("ingame_nick", "")
+
             row = {
                 "profile_code": pc,
-                "ingame_nick": e.ingame_nick if e.ingame_nick is not None else base.get("ingame_nick", ""),
+                "ingame_nick": ingame_nick_val,
                 "mw_nick": e.mw_nick if e.mw_nick is not None else base.get("mw_nick", ""),
                 "guild": e.guild if e.guild is not None else base.get("guild", ""),
                 "main_map": e.main_map if e.main_map is not None else base.get("main_map", ""),
@@ -148,16 +162,17 @@ def save_friend_list(body: SaveFriendListRequest) -> dict[str, Any]:
             row.pop("id", None)
             return row
 
-        # 1) 검색 대상의 friend_list에 모든 친구 코드 추가 (본인 제외)
+        # 1) 검색 대상의 friend_list에 모든 친구 코드 추가 + friend_list_direct 마킹
         if search_code in existing_map:
             base = existing_map[search_code]
             old_val = base.get("friend_list", "") or ""
             new_val = merge_unique(old_val, [fc for fc in friend_codes if fc != search_code])
+            row = to_upsert_row(base)
             if new_val != old_val:
-                row = to_upsert_row(base)
                 row["friend_list"] = new_val
                 row["updated_at"] = now
-                rows_to_upsert.append(row)
+            row["friend_list_direct"] = True
+            rows_to_upsert.append(row)
 
         # 2) 검색된 각 친구의 friend_list에 검색 대상 코드 추가
         #    search_code 본인은 스킵 (본인 검색 결과가 friend_codes에 포함될 수 있음)

@@ -71,6 +71,55 @@ def _diff(prev: dict[str, dict], curr: dict[str, dict]) -> list[dict]:
     return events
 
 
+def monitor_friends_multi(
+    ppsns: list[str],
+    interval: float,
+    emit: Callable[[dict], None],
+    stop: threading.Event,
+) -> None:
+    """다중 PPSN 동시 모니터링. 각 PPSN마다 스레드를 실행하고 중복 이벤트를 제거한다."""
+    if len(ppsns) == 1:
+        monitor_friends(ppsns[0], interval, emit, stop)
+        return
+
+    lock = threading.Lock()
+    recent_events: dict[tuple, float] = {}
+    dedup_window = max(interval * 2, 10.0)
+
+    def dedup_emit(msg: dict) -> None:
+        if msg.get("type") in ("online", "channel"):
+            entry = msg.get("entry", {})
+            key = (
+                entry.get("ppsn", ""),
+                msg["type"],
+                entry.get("isOnline"),
+                entry.get("gameInstanceId", ""),
+            )
+            now = time.time()
+            with lock:
+                if now - recent_events.get(key, 0) < dedup_window:
+                    return
+                recent_events[key] = now
+                cutoff = now - dedup_window * 2
+                expired = [k for k, v in recent_events.items() if v < cutoff]
+                for k in expired:
+                    del recent_events[k]
+        emit(msg)
+
+    threads = [
+        threading.Thread(
+            target=monitor_friends,
+            args=(ppsn, interval, dedup_emit, stop),
+            daemon=True,
+        )
+        for ppsn in ppsns
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+
 def monitor_friends(
     ppsn: str,
     interval: float,

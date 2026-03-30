@@ -195,6 +195,8 @@
                 <th>프로필 코드</th>
                 <th>채널명</th>
                 <th>인겜닉</th>
+                <th>길드</th>
+                <th>메모</th>
                 <th>월드명</th>
                 <th>메월닉</th>
                 <th>채널 코드</th>
@@ -205,8 +207,8 @@
           </table>
         </div>
         <div class="panel-actions">
-          <button onclick="Friends.saveToUserDB()">유저 DB에 저장</button>
-          <button onclick="Friends.saveFriendList()">친구목록 저장</button>
+          <button id="friend-save-db-btn" onclick="Friends.saveToUserDB()">유저 DB에 저장</button>
+          <button id="friend-save-list-btn" onclick="Friends.saveFriendList()">친구목록 저장</button>
           <button onclick="MultiSearch.open()">2촌 검색</button>
         </div>
       </div>
@@ -315,11 +317,17 @@
           <label>PPSN</label>
           <input type="text" id="monitor-ppsn" placeholder="예: 20372100005861109" style="width:180px">
           <label>갱신 간격 (초)</label>
-          <input type="number" id="monitor-interval" value="5" min="3" step="1" style="width:55px">
+          <input type="number" id="monitor-interval" value="5" min="1" step="0.5" style="width:55px">
           <button id="monitor-start-btn" onclick="Monitor.start()">시작</button>
           <button id="monitor-stop-btn" onclick="Monitor.stop()" disabled>중지</button>
+          <label style="margin-left:12px">월드 필터</label>
+          <input type="text" id="monitor-world-filter" placeholder="월드명 입력..." style="width:140px" oninput="Monitor.setWorldFilter(this.value)">
         </div>
         <div id="monitor-status" class="monitor-status"></div>
+        <div id="monitor-target-row" class="monitor-target-row hidden">
+          타겟 필터 — <span id="monitor-target-count">0</span>명 지정됨
+          <button onclick="Monitor.clearTargetFilter()" style="margin-left:8px">전체 보기</button>
+        </div>
         <div class="monitor-body">
           <div class="monitor-log-panel">
             <div class="monitor-panel-title">
@@ -336,11 +344,16 @@
               <table id="monitor-table">
                 <thead>
                   <tr>
+                    <th class="mon-bracket-col"></th>
                     <th>상태</th>
-                    <th>닉네임</th>
-                    <th>프로필 코드</th>
-                    <th>채널명</th>
-                    <th>채널 코드</th>
+                    <th data-sort-key="profileName">메월닉</th>
+                    <th data-sort-key="ingameNick">인겜닉</th>
+                    <th data-sort-key="guild">길드</th>
+                    <th data-sort-key="memo">메모</th>
+                    <th data-sort-key="profileCode">프로필 코드</th>
+                    <th data-sort-key="channelName">채널명</th>
+                    <th data-sort-key="worldName">월드명</th>
+                    <th data-sort-key="gameInstanceId">채널 코드</th>
                   </tr>
                 </thead>
                 <tbody id="monitor-tbody"></tbody>

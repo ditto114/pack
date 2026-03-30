@@ -16,6 +16,8 @@ const Friends = (() => {
     { key: 'profile_code',     label: '프로필 코드' },
     { key: '_channel_name',    label: '채널명' },
     { key: '_ingame_nick',     label: '인겜닉' },
+    { key: '_guild',           label: '길드' },
+    { key: '_memo',            label: '메모' },
     { key: 'world_name',       label: '월드명' },
     { key: 'display_name',     label: '메월닉' },
     { key: 'game_instance_id', label: '채널 코드' },
@@ -161,6 +163,8 @@ const Friends = (() => {
 
   function makeRow(e) {
     e._ingame_nick = UserDB.getIngameNick(e.profile_code);
+    e._guild       = UserDB.getGuild(e.profile_code);
+    e._memo        = UserDB.getMemo(e.profile_code);
     const statusIcon = e.status === '온라인' ? '🟢' : '⛔';
     const isNew = e.profile_code && !UserDB.has(e.profile_code);
     const isSelf = !!e.is_self;
@@ -171,6 +175,8 @@ const Friends = (() => {
       <td style="color:${isNew ? '#ffff00' : ''}">${e.profile_code ? '#' + esc(e.profile_code) : ''}</td>
       <td>${esc(e._channel_name)}</td>
       <td>${esc(e._ingame_nick)}</td>
+      <td>${esc(e._guild)}</td>
+      <td>${esc(e._memo)}</td>
       <td>${esc(e.world_name)}</td>
       <td>${esc(e.display_name)}</td>
       <td>${esc(e.game_instance_id)}</td>
@@ -186,6 +192,8 @@ const Friends = (() => {
     const countBadge = `<span class="group-friend-count">(친구 ${friendCount}명)</span>`;
     if (selfEntry) {
       selfEntry._ingame_nick = UserDB.getIngameNick(selfEntry.profile_code);
+      selfEntry._guild       = UserDB.getGuild(selfEntry.profile_code);
+      selfEntry._memo        = UserDB.getMemo(selfEntry.profile_code);
       const icon = selfEntry.status === '온라인' ? '🟢' : '⛔';
       const isNew = selfEntry.profile_code && !UserDB.has(selfEntry.profile_code);
       tr.innerHTML = `
@@ -193,6 +201,8 @@ const Friends = (() => {
         <td style="color:${isNew ? '#ffff00' : ''};font-weight:bold">#${esc(selfEntry.profile_code)} ${countBadge}</td>
         <td>${esc(selfEntry._channel_name)}</td>
         <td>${esc(selfEntry._ingame_nick)}</td>
+        <td>${esc(selfEntry._guild)}</td>
+        <td>${esc(selfEntry._memo)}</td>
         <td>${esc(selfEntry.world_name)}</td>
         <td>${esc(selfEntry.display_name)}</td>
         <td>${esc(selfEntry.game_instance_id)}</td>
@@ -202,7 +212,7 @@ const Friends = (() => {
       tr.innerHTML = `
         <td>${btn}</td>
         <td style="font-weight:bold;color:var(--text-dim)">#${esc(code)} ${countBadge}</td>
-        <td colspan="6" style="color:var(--text-dim)">본인 정보 없음</td>
+        <td colspan="8" style="color:var(--text-dim)">본인 정보 없음</td>
       `;
     }
     return tr;
@@ -285,15 +295,39 @@ const Friends = (() => {
     document.getElementById('friend-stop-btn').disabled = !r;
   }
 
-  function saveToUserDB() {
+  // ── 버튼 로딩바 헬퍼 ──────────────────────────────────────────
+  function _btnProgressStart(btn, label) {
+    btn.disabled = true;
+    btn.innerHTML = `<span class="btn-progress-bar" style="width:0%"></span><span class="btn-label">${label}</span>`;
+    btn.classList.add('btn-in-progress');
+  }
+  function _btnProgressSet(btn, pct) {
+    const bar = btn.querySelector('.btn-progress-bar');
+    if (bar) bar.style.width = pct + '%';
+  }
+  function _btnProgressDone(btn, label) {
+    _btnProgressSet(btn, 100);
+    setTimeout(() => {
+      btn.classList.remove('btn-in-progress');
+      btn.textContent = label;
+      btn.disabled = false;
+    }, 500);
+  }
+
+  async function saveToUserDB() {
     const data = entries
       .filter(e => e.profile_code)
-      .map(e => ({ profile_code: e.profile_code, mw_nick: e.display_name || '' }));
+      .map(e => ({ profile_code: e.profile_code, mw_nick: e.display_name || '', ppsn: e.ppsn || '' }));
     if (!data.length) {
       alert('저장할 데이터가 없습니다.');
       return;
     }
-    UserDB.saveEntries(data);
+    const btn = document.getElementById('friend-save-db-btn');
+    _btnProgressStart(btn, '유저 DB에 저장');
+    _btnProgressSet(btn, 15);
+    setTimeout(() => _btnProgressSet(btn, 55), 200);
+    await UserDB.saveEntries(data);
+    _btnProgressDone(btn, '유저 DB에 저장');
   }
 
   async function _doSave(searchCode, friendCodes) {
@@ -318,12 +352,16 @@ const Friends = (() => {
       alert('먼저 친구 검색을 실행하세요.');
       return;
     }
+    const btn = document.getElementById('friend-save-list-btn');
 
     if (lastSearchCodes.length === 1) {
       // 단일 코드: 기존 동작
       const code = lastSearchCodes[0];
       const friendCodes = entries.filter(e => !e.is_self).map(e => e.profile_code).filter(c => c);
       if (!friendCodes.length) { alert('저장할 친구 목록이 없습니다.'); return; }
+      _btnProgressStart(btn, '친구목록 저장');
+      _btnProgressSet(btn, 15);
+      setTimeout(() => _btnProgressSet(btn, 60), 200);
       try {
         const res = await fetch('/api/user-db/save-friend-list', {
           method: 'POST',
@@ -332,19 +370,27 @@ const Friends = (() => {
         });
         const data = await res.json();
         if (data.status === 'ok') {
+          _btnProgressDone(btn, '친구목록 저장');
           alert(`친구목록 저장 완료 (${data.updated}건 업데이트)`);
           await UserDB.load();
         } else {
+          _btnProgressDone(btn, '친구목록 저장');
           alert('저장 실패: ' + (data.error || ''));
         }
-      } catch (err) { alert('저장 실패: ' + err); }
+      } catch (err) {
+        _btnProgressDone(btn, '친구목록 저장');
+        alert('저장 실패: ' + err);
+      }
       return;
     }
 
-    // 다중 코드: 코드별로 각각의 친구목록 저장
+    // 다중 코드: 코드별 실제 진행률 표시
     let totalUpdated = 0;
     let savedCount = 0;
-    for (const code of lastSearchCodes) {
+    _btnProgressStart(btn, '친구목록 저장');
+    for (let i = 0; i < lastSearchCodes.length; i++) {
+      _btnProgressSet(btn, Math.round((i / lastSearchCodes.length) * 100));
+      const code = lastSearchCodes[i];
       const friendCodes = entries
         .filter(e => e.search_code === code && !e.is_self)
         .map(e => e.profile_code)
@@ -353,6 +399,7 @@ const Friends = (() => {
       totalUpdated += await _doSave(code, friendCodes);
       savedCount++;
     }
+    _btnProgressDone(btn, '친구목록 저장');
     if (!savedCount) { alert('저장할 친구 목록이 없습니다.'); return; }
     alert(`친구목록 저장 완료 — ${lastSearchCodes.length}개 코드, ${totalUpdated}건 업데이트`);
     await UserDB.load();

@@ -51,6 +51,12 @@ class PacketCaptureService:
         self._port_pid_cache: dict[int, Optional[int]] = {}
         self._pid_client_map: dict[int, int] = {}
         self._client_counter = 0
+        # 전체 port→pid 매핑 (주기적 갱신)
+        self._global_port_map: dict[int, int] = {}
+        self._global_port_map_time: float = 0.0
+        self._GLOBAL_PORT_MAP_TTL: float = 5.0  # 초
+        # PID capture filter (None = no filter)
+        self._filter_pid: Optional[int] = None
 
     @property
     def is_running(self) -> bool:
@@ -64,9 +70,18 @@ class PacketCaptureService:
         port_text: str = "",
         text_filter: str = "",
         max_packets: int = 500,
+        pid_text: str = "",
     ) -> dict[str, Any]:
         if self.is_running:
             return {"error": "이미 캡쳐가 진행 중입니다."}
+
+        # PID 필터 파싱
+        if pid_text:
+            if not pid_text.strip().isdigit():
+                return {"error": "PID는 양의 정수여야 합니다."}
+            self._filter_pid = int(pid_text.strip())
+        else:
+            self._filter_pid = None
 
         filter_config = self._build_filter_config(ip_text, port_text)
 
@@ -86,6 +101,7 @@ class PacketCaptureService:
         self._port_pid_cache.clear()
         self._pid_client_map.clear()
         self._client_counter = 0
+        # _filter_pid는 위에서 이미 설정됨
 
         self.sniffer = AsyncSniffer(
             store=False,
@@ -169,6 +185,11 @@ class PacketCaptureService:
         direction = self._determine_direction(packet)
         local_port = self._extract_local_port(packet, direction)
         client_id, client_pid = self._resolve_client(local_port)
+
+        # PID 필터 적용
+        if self._filter_pid is not None and client_pid != self._filter_pid:
+            return
+
         utf8_text = None
         if payload:
             try:
@@ -378,16 +399,25 @@ class PacketCaptureService:
 
         return self._pid_client_map[pid], pid
 
-    @staticmethod
-    def _lookup_pid_by_port(port: int) -> Optional[int]:
-        """psutil로 로컬 포트를 소유한 프로세스의 PID를 조회한다."""
+    def _refresh_global_port_map(self) -> None:
+        """psutil.net_connections()를 한 번 호출하여 전체 port→pid 매핑을 갱신한다."""
+        now = time.time()
+        if now - self._global_port_map_time < self._GLOBAL_PORT_MAP_TTL:
+            return
         try:
+            mapping: dict[int, int] = {}
             for conn in psutil.net_connections(kind="inet"):
-                if conn.laddr and conn.laddr.port == port and conn.pid:
-                    return conn.pid
+                if conn.laddr and conn.pid:
+                    mapping[conn.laddr.port] = conn.pid
+            self._global_port_map = mapping
         except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
             pass
-        return None
+        self._global_port_map_time = now
+
+    def _lookup_pid_by_port(self, port: int) -> Optional[int]:
+        """캐싱된 매핑에서 포트→PID를 조회한다."""
+        self._refresh_global_port_map()
+        return self._global_port_map.get(port)
 
     @staticmethod
     def _normalize_ip(addr: str) -> str:

@@ -22,6 +22,7 @@ class CaptureStartRequest(BaseModel):
     port: str = ""
     text_filter: str = ""
     max_packets: int = 500
+    pid: str = ""
 
 
 @router.post("/start")
@@ -31,6 +32,7 @@ async def start_capture(req: CaptureStartRequest) -> dict[str, Any]:
         port_text=req.port,
         text_filter=req.text_filter,
         max_packets=req.max_packets,
+        pid_text=req.pid,
     )
     return result
 
@@ -95,15 +97,25 @@ async def ws_packets(websocket: WebSocket) -> None:
     await websocket.accept()
     try:
         while True:
+            # 첫 패킷은 블로킹 대기
             data = await packet_service.get_ws_packet()
-            # also feed world match service
-            utf8_text = data.get("utf8_text")
-            captured_at = data.get("captured_at", 0.0)
-            if utf8_text:
-                world_match_service.process_text(
-                    utf8_text, captured_at, session_id=packet_service.session_id
-                )
-            await websocket.send_json(data)
+            batch = [data]
+            # 큐에 남아있는 패킷을 최대 100개까지 모아서 배치 전송
+            for _ in range(99):
+                try:
+                    extra = packet_service._ws_queue.get_nowait()
+                    batch.append(extra)
+                except asyncio.QueueEmpty:
+                    break
+            # world match service 에도 전달
+            for pkt in batch:
+                utf8_text = pkt.get("utf8_text")
+                captured_at = pkt.get("captured_at", 0.0)
+                if utf8_text:
+                    world_match_service.process_text(
+                        utf8_text, captured_at, session_id=packet_service.session_id
+                    )
+            await websocket.send_json({"type": "batch", "packets": batch})
     except WebSocketDisconnect:
         pass
     except asyncio.CancelledError:

@@ -15,6 +15,7 @@ const App = (() => {
     if (capturing) return;
     const ip = document.getElementById('filter-ip').value.trim();
     const port = document.getElementById('filter-port').value.trim();
+    const pid = document.getElementById('filter-pid').value.trim();
     const textFilter = document.getElementById('filter-text').value.trim();
     const maxPackets = parseInt(document.getElementById('filter-max').value) || 500;
 
@@ -22,7 +23,7 @@ const App = (() => {
       const res = await fetch('/api/capture/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ip, port, text_filter: textFilter, max_packets: maxPackets }),
+        body: JSON.stringify({ ip, port, pid, text_filter: textFilter, max_packets: maxPackets }),
       });
       const data = await res.json();
       if (data.error) {
@@ -41,9 +42,14 @@ const App = (() => {
     // connect packet stream WS
     WS.connect('/ws/packets', {
       onMessage(data) {
-        Packets.addPacket(data);
-        World.processPacketForExperiment(data.utf8_text);
-        UserList.processPacket(data.utf8_text);
+        // 배치 전송 지원
+        const packets = (data.type === 'batch' && Array.isArray(data.packets))
+          ? data.packets : [data];
+        for (const pkt of packets) {
+          Packets.addPacket(pkt);
+          World.processPacketForExperiment(pkt.utf8_text);
+          UserList.processPacket(pkt.utf8_text);
+        }
       },
     });
   }

@@ -8,6 +8,9 @@ const Packets = (() => {
   const clientInfo = new Map();
   /** 현재 선택된 탭 (client_id, null 이면 "전체") */
   let activeClient = null;
+  /** 렌더링 버퍼: requestAnimationFrame으로 모아서 처리 */
+  let pendingTexts = [];
+  let rafId = null;
 
   function init() {
     document.getElementById('filter-text').addEventListener('input', refreshOutput);
@@ -92,12 +95,25 @@ const Packets = (() => {
   }
 
   function appendToOutput(pkt) {
+    pendingTexts.push(formatPacket(pkt));
+    if (!rafId) {
+      rafId = requestAnimationFrame(flushPendingTexts);
+    }
+  }
+
+  function flushPendingTexts() {
+    rafId = null;
+    if (!pendingTexts.length) return;
     const el = document.getElementById('packet-output');
     if (el.textContent === '캡쳐를 시작하면 패킷이 여기에 표시됩니다.') {
       el.textContent = '';
     }
-    el.textContent += formatPacket(pkt);
-
+    el.textContent += pendingTexts.join('');
+    pendingTexts = [];
+    // 최대 표시 길이 제한 (100만 자 초과 시 뒤쪽만 유지)
+    if (el.textContent.length > 1_000_000) {
+      el.textContent = el.textContent.slice(-500_000);
+    }
     const autoScroll = document.getElementById('auto-scroll');
     if (autoScroll && autoScroll.checked) {
       el.scrollTop = el.scrollHeight;
@@ -153,6 +169,8 @@ const Packets = (() => {
     packetsByClient.clear();
     clientInfo.clear();
     activeClient = null;
+    pendingTexts = [];
+    if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
     document.getElementById('packet-tabs').innerHTML = '';
     document.getElementById('packet-output').textContent = '캡쳐를 시작하면 패킷이 여기에 표시됩니다.';
   }

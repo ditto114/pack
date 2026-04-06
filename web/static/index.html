@@ -4,7 +4,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title> 1203EH CRM Dashboard</title>
+  <title> 1203EH DB Center</title>
   <link rel="stylesheet" href="/css/style.css?v=22">
 </head>
 
@@ -19,6 +19,9 @@
 
         <label>포트</label>
         <input type="text" id="filter-port" placeholder="비우면 모든 포트">
+
+        <label>PID</label>
+        <input type="text" id="filter-pid" placeholder="비우면 모든 프로세스">
 
         <label>텍스트 포함</label>
         <input type="text" id="filter-text" placeholder="UTF-8 텍스트 기준 검색">
@@ -56,7 +59,7 @@
           <button id="btn-common-friends" onclick="UserDB.findCommonFriends()"
             title="선택된 행들의 공통 친구를 빈도순으로 표시">겹지인찾기</button>
           <input type="text" id="userdb-search" placeholder="검색..." style="margin-left:auto;width:140px"
-            onkeydown="if(event.key==='Enter') UserDB.setFilter(this.value)">
+            oninput="UserDB.setFilter(this.value)">
           <button onclick="UserDB.deduplicate()">중복프로필 제거</button>
           <button onclick="UserDB.clearAll()">초기화</button>
         </div>
@@ -76,6 +79,11 @@
             </thead>
             <tbody id="userdb-tbody"></tbody>
           </table>
+        </div>
+        <div id="userdb-pagination" style="display:flex;align-items:center;gap:8px;padding:6px 8px;font-size:13px;color:var(--text-dim)">
+          <button id="userdb-prev" onclick="UserDB.prevPage()" disabled>&lt; 이전</button>
+          <span id="userdb-page-info">-</span>
+          <button id="userdb-next" onclick="UserDB.nextPage()">다음 &gt;</button>
         </div>
       </div>
 
@@ -321,7 +329,8 @@
           <button id="monitor-start-btn" onclick="Monitor.start()">시작</button>
           <button id="monitor-stop-btn" onclick="Monitor.stop()" disabled>중지</button>
           <label style="margin-left:12px">월드 필터</label>
-          <input type="text" id="monitor-world-filter" placeholder="월드명 입력..." style="width:140px" oninput="Monitor.setWorldFilter(this.value)">
+          <input type="text" id="monitor-world-filter" placeholder="월드명 입력..." style="width:140px"
+            oninput="Monitor.setWorldFilter(this.value)">
         </div>
         <div id="monitor-status" class="monitor-status"></div>
         <div id="monitor-target-row" class="monitor-target-row hidden">

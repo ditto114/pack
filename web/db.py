@@ -129,11 +129,19 @@ def bulk_upsert_world_matches(rows: list[dict[str, Any]]) -> list[dict[str, Any]
     return resp.data or []
 
 
-def get_world_matches(session_id: Optional[str] = None) -> list[dict[str, Any]]:
+def get_world_matches(
+    session_id: Optional[str] = None,
+    *,
+    limit: int = 0,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
     q = get_client().table("world_matches").select("*")
     if session_id:
         q = q.eq("session_id", session_id)
-    resp = q.order("captured_at", desc=True).execute()
+    q = q.order("captured_at", desc=True)
+    if limit > 0:
+        q = q.range(offset, offset + limit - 1)
+    resp = q.execute()
     return resp.data
 
 
@@ -189,6 +197,91 @@ def get_user_db_entries() -> list[dict[str, Any]]:
         if len(batch) < PAGE:
             break
         offset += PAGE
+    return all_rows
+
+
+_ALLOWED_SORT_COLUMNS = {
+    "profile_code", "ingame_nick", "mw_nick", "guild",
+    "main_map", "memo", "ppsn", "updated_at",
+}
+
+
+def _count_tags(val: Any) -> int:
+    """콤마 구분 문자열의 태그 개수를 반환한다."""
+    if not val:
+        return 0
+    return len([s for s in str(val).split(",") if s.strip()])
+
+
+def get_user_db_paginated(
+    *,
+    limit: int = 100,
+    offset: int = 0,
+    search: str = "",
+    sort_key: str = "",
+    sort_asc: bool = True,
+) -> tuple[list[dict[str, Any]], int]:
+    """페이지네이션 + 텍스트 검색 + 정렬을 지원하는 user_db 조회.
+    (rows, total_count) 튜플을 반환한다."""
+    client = get_client()
+
+    # 검색 필터 빌더
+    def _apply_search(q: Any) -> Any:
+        if not search:
+            return q
+        pattern = f"%{search}%"
+        return q.or_(
+            f"profile_code.ilike.{pattern},"
+            f"ingame_nick.ilike.{pattern},"
+            f"mw_nick.ilike.{pattern},"
+            f"guild.ilike.{pattern},"
+            f"memo.ilike.{pattern},"
+            f"friend_list.ilike.{pattern}"
+        )
+
+    # 총 건수
+    count_q = _apply_search(client.table("user_db").select("*", count="exact"))
+    count_resp = count_q.limit(0).execute()
+    total = count_resp.count or 0
+
+    # friend_list 는 태그 수 기준 정렬 → DB에서 할 수 없으므로 Python 처리
+    if sort_key == "friend_list":
+        # 전체 fetch 후 Python 정렬 + 슬라이싱
+        PAGE = 1000
+        all_rows: list[dict[str, Any]] = []
+        off = 0
+        while True:
+            q = _apply_search(client.table("user_db").select("*"))
+            resp = q.order("updated_at", desc=True).range(off, off + PAGE - 1).execute()
+            batch = resp.data or []
+            all_rows.extend(batch)
+            if len(batch) < PAGE:
+                break
+            off += PAGE
+        all_rows.sort(key=lambda r: _count_tags(r.get("friend_list")), reverse=not sort_asc)
+        return all_rows[offset:offset + limit], total
+
+    # 일반 컬럼 정렬 → Supabase order()
+    data_q = _apply_search(client.table("user_db").select("*"))
+    order_col = sort_key if sort_key in _ALLOWED_SORT_COLUMNS else "updated_at"
+    order_desc = not sort_asc if sort_key in _ALLOWED_SORT_COLUMNS else True
+    data_q = data_q.order(order_col, desc=order_desc)
+    resp = data_q.range(offset, offset + limit - 1).execute()
+    return resp.data or [], total
+
+
+def get_user_db_by_codes(codes: list[str]) -> list[dict[str, Any]]:
+    """주어진 profile_code 목록에 해당하는 행만 조회한다 (IN 조건)."""
+    if not codes:
+        return []
+    client = get_client()
+    all_rows: list[dict[str, Any]] = []
+    # Supabase .in_() 은 한 번에 너무 많은 값을 넘기면 URL 길이 제한에 걸릴 수 있음
+    BATCH = 200
+    for i in range(0, len(codes), BATCH):
+        batch_codes = codes[i:i + BATCH]
+        resp = client.table("user_db").select("*").in_("profile_code", batch_codes).execute()
+        all_rows.extend(resp.data or [])
     return all_rows
 
 
@@ -250,7 +343,10 @@ def deduplicate_user_db_entries() -> int:
             to_delete.append(row["profile_code"])
 
     client = get_client()
-    for pc in to_delete:
-        client.table("user_db").delete().eq("profile_code", pc).execute()
+    # 배치 삭제: IN 조건으로 한 번에 처리 (URL 길이 제한 고려 200개씩)
+    BATCH = 200
+    for i in range(0, len(to_delete), BATCH):
+        batch = to_delete[i:i + BATCH]
+        client.table("user_db").delete().in_("profile_code", batch).execute()
 
     return len(to_delete)

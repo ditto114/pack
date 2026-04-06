@@ -6,7 +6,7 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 from ..db import (
@@ -29,8 +29,12 @@ class SaveRequest(BaseModel):
 
 
 @router.get("")
-def get_world_matches(session_id: Optional[str] = None) -> list[dict[str, Any]]:
-    rows = db_get_world_matches(session_id)
+def get_world_matches(
+    session_id: Optional[str] = None,
+    limit: int = Query(default=0, ge=0),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
+    rows = db_get_world_matches(session_id, limit=limit, offset=offset)
     for row in rows:
         ca = row.get("captured_at")
         if isinstance(ca, str):

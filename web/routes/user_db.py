@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
 from ..db import (
     get_user_db_entries,
+    get_user_db_paginated,
+    get_user_db_by_codes,
     upsert_user_db_entries,
     update_user_db_field,
     delete_user_db_entry,
@@ -48,8 +50,21 @@ class SaveFriendListRequest(BaseModel):
 
 
 @router.get("")
-def get_all() -> list[dict[str, Any]]:
-    return get_user_db_entries()
+def get_all(
+    limit: int = Query(default=0, ge=0),
+    offset: int = Query(default=0, ge=0),
+    search: str = Query(default=""),
+    sort_key: str = Query(default=""),
+    sort_asc: bool = Query(default=True),
+) -> dict[str, Any]:
+    """유저 DB 목록 조회. limit=0이면 전체 반환 (하위 호환)."""
+    if limit <= 0 and not search and not sort_key:
+        return {"rows": get_user_db_entries(), "total": -1}
+    rows, total = get_user_db_paginated(
+        limit=limit or 100, offset=offset, search=search,
+        sort_key=sort_key, sort_asc=sort_asc,
+    )
+    return {"rows": rows, "total": total}
 
 
 @router.delete("")
@@ -71,7 +86,8 @@ def bulk_save(body: BulkSaveRequest) -> dict[str, Any]:
         if not body.entries:
             return {"status": "empty", "count": 0}
 
-        existing_rows = get_user_db_entries()
+        target_codes = [e.profile_code.strip() for e in body.entries if e.profile_code]
+        existing_rows = get_user_db_by_codes(target_codes)
         existing_map = {r["profile_code"]: r for r in existing_rows if r.get("profile_code")}
 
         now = _now_iso()
@@ -138,7 +154,8 @@ def save_friend_list(body: SaveFriendListRequest) -> dict[str, Any]:
         if not search_code or not friend_codes:
             return {"status": "empty"}
 
-        existing_rows = get_user_db_entries()
+        relevant_codes = list(set([search_code] + friend_codes))
+        existing_rows = get_user_db_by_codes(relevant_codes)
         existing_map = {r["profile_code"]: r for r in existing_rows if r.get("profile_code")}
 
         def parse_list(val: str) -> list[str]:

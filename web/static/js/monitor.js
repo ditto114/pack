@@ -167,12 +167,12 @@ const Monitor = (() => {
     document.getElementById('monitor-online-count').textContent = online.length;
     document.getElementById('monitor-total-count').textContent = all.length;
 
-    // 같은 채널 유저 묶음 기호 사전 계산
+    // 같은 채널 유저 묶음 기호 사전 계산 (채널코드 기준)
     const channelGroups = {};
     for (const f of online) {
-      const ch = resolveChannel(f.gameInstanceId);
-      if (!channelGroups[ch]) channelGroups[ch] = [];
-      channelGroups[ch].push(f.ppsn);
+      const code = f.gameInstanceId || '';
+      if (!channelGroups[code]) channelGroups[code] = [];
+      channelGroups[code].push(f.ppsn);
     }
     const bracketMap = {};
     for (const [, ppsns] of Object.entries(channelGroups)) {

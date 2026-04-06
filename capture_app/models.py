@@ -59,3 +59,4 @@ class FriendStatusEntry:
 class FilterConfig:
     networks: list[NetworkType]
     port: Optional[int]
+    pid: Optional[int] = None

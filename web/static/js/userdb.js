@@ -3,10 +3,18 @@
  */
 const UserDB = (() => {
   let entries = [];
+  /** profile_code → entry 인덱스 (O(1) 룩업) */
+  let entryIndex = new Map();
   let filterText = '';
   let ctxMenu = null;
   let sortKey = null;
   let sortAsc = true;
+
+  // ── 페이지네이션 상태 ──────────────────────────────────
+  const PAGE_SIZE = 100;
+  let currentPage = 0;   // 0-based
+  let totalRows = 0;
+  let serverSearch = '';  // 현재 서버에 적용된 검색어
 
   // ── 다중 행 선택 / 텍스트 선택 상태 ────────────────────────
   let selectedCodes = new Set();
@@ -38,7 +46,7 @@ const UserDB = (() => {
   const TAG_FIELDS = new Set(['ingame_nick', 'friend_list']);
 
   function isDirectSearched(profileCode) {
-    const entry = entries.find(e => e.profile_code === profileCode);
+    const entry = entryIndex.get(profileCode);
     return !!(entry && entry.friend_list_direct);
   }
 
@@ -47,6 +55,34 @@ const UserDB = (() => {
     setupSelectionListeners();
     setupCfSelectionListeners();
     await load();
+    // 백그라운드: 전체 인덱스 구축 (Monitor, Friends 등 다른 탭 룩업용)
+    loadFullIndex();
+  }
+
+  let _fullIndexLoaded = false;
+  let _fullIndexLoading = false;
+
+  function invalidateFullIndex() {
+    _fullIndexLoaded = false;
+  }
+
+  async function loadFullIndex() {
+    if (_fullIndexLoading) return;
+    _fullIndexLoading = true;
+    try {
+      const res = await fetch('/api/user-db');
+      if (!res.ok) return;
+      const data = await res.json();
+      const allRows = Array.isArray(data) ? data : (data.rows || []);
+      for (const e of allRows) {
+        if (e.profile_code) entryIndex.set(e.profile_code, e);
+      }
+      _fullIndexLoaded = true;
+    } catch (err) {
+      // 실패해도 무시 — 현재 페이지 데이터는 이미 인덱스에 있음
+    } finally {
+      _fullIndexLoading = false;
+    }
   }
 
   // ── 다중 선택 이벤트 리스너 (tbody에 위임) ──────────────────
@@ -173,8 +209,9 @@ const UserDB = (() => {
       sortKey = key;
       sortAsc = true;
     }
+    currentPage = 0;
     updateHeaderIndicators();
-    render();
+    load();
   }
 
   function updateHeaderIndicators() {
@@ -194,68 +231,97 @@ const UserDB = (() => {
   }
 
   function getFiltered() {
-    const terms = getTerms();
-    if (!terms.length) return entries;
-    return entries.filter(e =>
-      terms.some(q =>
-        COLUMNS.some(col => (e[col.key] || '').toLowerCase().includes(q))
-      )
-    );
+    // 검색은 서버측에서 처리됨 — 클라이언트 필터링 불필요
+    return entries;
+  }
+
+  function countTags(val) {
+    return val ? val.split(',').filter(s => s.trim()).length : 0;
+  }
+
+  function compareBySortKey(a, b) {
+    if (sortKey === 'friend_list') {
+      return countTags(a.friend_list) - countTags(b.friend_list);
+    }
+    const va = (a[sortKey] || '').toLowerCase();
+    const vb = (b[sortKey] || '').toLowerCase();
+    return va < vb ? -1 : va > vb ? 1 : 0;
   }
 
   function getSorted() {
-    const base = getFiltered();
-    const terms = getTerms();
-
-    // 검색어가 있으면: 프로필 코드 매칭을 최우선, 동순위는 정렬 키로 2차 정렬
-    if (terms.length) {
-      const priority = (e) => {
-        if (terms.some(q => (e.profile_code || '').toLowerCase().includes(q))) return 0;
-        if (terms.some(q => (e.ingame_nick  || '').toLowerCase().includes(q))) return 1;
-        if (terms.some(q => (e.guild        || '').toLowerCase().includes(q))) return 2;
-        if (terms.some(q => (e.memo         || '').toLowerCase().includes(q))) return 3;
-        if (terms.some(q => (e.friend_list  || '').toLowerCase().includes(q))) return 4;
-        return 5;
-      };
-      return [...base].sort((a, b) => {
-        const pd = priority(a) - priority(b);
-        if (pd !== 0) return pd;
-        if (sortKey) {
-          const va = (a[sortKey] || '').toLowerCase();
-          const vb = (b[sortKey] || '').toLowerCase();
-          const cmp = va < vb ? -1 : va > vb ? 1 : 0;
-          return sortAsc ? cmp : -cmp;
-        }
-        return 0;
-      });
-    }
-
-    // 검색어 없음: 헤더 클릭 정렬만 적용
-    if (sortKey) {
-      return [...base].sort((a, b) => {
-        const va = (a[sortKey] || '').toLowerCase();
-        const vb = (b[sortKey] || '').toLowerCase();
-        const cmp = va < vb ? -1 : va > vb ? 1 : 0;
-        return sortAsc ? cmp : -cmp;
-      });
-    }
-
-    return base;
+    // 정렬은 서버측에서 처리됨 — 클라이언트 재정렬 불필요
+    return getFiltered();
   }
 
+  let _searchTimer = null;
   function setFilter(value) {
     filterText = value.trim();
-    render();
+    // 서버 검색은 디바운스 300ms
+    clearTimeout(_searchTimer);
+    _searchTimer = setTimeout(() => {
+      if (filterText !== serverSearch) {
+        currentPage = 0;
+        load();
+      }
+    }, 300);
   }
 
-  async function load() {
+  function rebuildIndex() {
+    // entryIndex 는 누적 캐시 — 페이지 이동해도 이전에 본 entry 정보 유지
+    // (Monitor, Friends 등 다른 탭에서 profile_code 룩업 시 필요)
+    for (const e of entries) {
+      if (e.profile_code) entryIndex.set(e.profile_code, e);
+    }
+  }
+
+  async function load({ refreshIndex = false } = {}) {
     try {
-      const res = await fetch('/api/user-db');
+      serverSearch = filterText;
+      const offset = currentPage * PAGE_SIZE;
+      const params = new URLSearchParams({ limit: PAGE_SIZE, offset });
+      if (serverSearch) params.set('search', serverSearch);
+      if (sortKey) {
+        params.set('sort_key', sortKey);
+        params.set('sort_asc', sortAsc);
+      }
+      const res = await fetch('/api/user-db?' + params);
       if (!res.ok) return;
-      entries = await res.json();
+      const data = await res.json();
+      entries = Array.isArray(data) ? data : (data.rows || []);
+      totalRows = data.total != null && data.total >= 0 ? data.total : entries.length;
+      rebuildIndex();
       render();
+      updatePagination();
+      // 데이터 변경 후거나, 전체 인덱스가 아직 없으면 백그라운드로 구축
+      if (refreshIndex) invalidateFullIndex();
+      if (!_fullIndexLoaded) loadFullIndex();
     } catch (err) {
       console.error('유저 DB 로드 실패:', err);
+    }
+  }
+
+  function updatePagination() {
+    const totalPages = Math.max(1, Math.ceil(totalRows / PAGE_SIZE));
+    const info = document.getElementById('userdb-page-info');
+    if (info) info.textContent = `${currentPage + 1} / ${totalPages} (${totalRows}건)`;
+    const prev = document.getElementById('userdb-prev');
+    const next = document.getElementById('userdb-next');
+    if (prev) prev.disabled = currentPage <= 0;
+    if (next) next.disabled = currentPage >= totalPages - 1;
+  }
+
+  function nextPage() {
+    const totalPages = Math.ceil(totalRows / PAGE_SIZE);
+    if (currentPage < totalPages - 1) {
+      currentPage++;
+      load();
+    }
+  }
+
+  function prevPage() {
+    if (currentPage > 0) {
+      currentPage--;
+      load();
     }
   }
 
@@ -264,10 +330,7 @@ const UserDB = (() => {
     tbody.innerHTML = '';
     const sorted = getSorted();
     lastSorted = sorted;
-    const total = entries.length;
-    const shown = sorted.length;
-    document.getElementById('userdb-count').textContent =
-      filterText ? `${shown}/${total}` : String(total);
+    document.getElementById('userdb-count').textContent = String(totalRows || entries.length);
     for (let i = 0; i < sorted.length; i++) {
       const entry = sorted[i];
       const tr = document.createElement('tr');
@@ -456,7 +519,9 @@ const UserDB = (() => {
         closeCtxMenu();
         const targetCodes = [...selectedCodes];
         const friendMap = {};
-        for (const entry of entries.filter(e => selectedCodes.has(e.profile_code))) {
+        for (const code of selectedCodes) {
+          const entry = entryIndex.get(code);
+          if (!entry) continue;
           const friends = (entry.friend_list || '').split(',').map(s => s.trim()).filter(s => s);
           if (friends.length > 0) friendMap[entry.profile_code] = friends;
         }
@@ -532,7 +597,7 @@ const UserDB = (() => {
     const saves = [];
 
     for (const pc of codes) {
-      const entry = entries.find(e => e.profile_code === pc);
+      const entry = entryIndex.get(pc);
       if (!entry) continue;
       for (const field of FIELDS) {
         const current = entry[field] || '';
@@ -605,7 +670,7 @@ const UserDB = (() => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ field, value }),
       });
-      const entry = entries.find(e => e.profile_code === profileCode);
+      const entry = entryIndex.get(profileCode);
       if (entry) entry[field] = value;
     } catch (err) {
       console.error('유저 DB 수정 실패:', err);
@@ -620,8 +685,8 @@ const UserDB = (() => {
   async function deleteRow(profileCode) {
     try {
       await fetch(`/api/user-db/${encodeURIComponent(profileCode)}`, { method: 'DELETE' });
-      entries = entries.filter(e => e.profile_code !== profileCode);
-      render();
+      entryIndex.delete(profileCode);
+      await load({ refreshIndex: true });
     } catch (err) {
       console.error('유저 DB 삭제 실패:', err);
     }
@@ -633,7 +698,9 @@ const UserDB = (() => {
       alert('먼저 행을 선택해주세요.\n(클릭 또는 드래그로 여러 행 선택 가능)');
       return;
     }
-    const selectedEntries = entries.filter(e => selectedCodes.has(e.profile_code));
+    const selectedEntries = [...selectedCodes]
+      .map(code => entryIndex.get(code))
+      .filter(e => e != null);
     const total = selectedEntries.length;
 
     // 각 친구 코드가 몇 명의 선택된 유저와 연결되어 있는지 카운트
@@ -677,7 +744,7 @@ const UserDB = (() => {
         const tr = document.createElement('tr');
         tr.dataset.profileCode = code;
         tr.dataset.rowIdx = String(idx);
-        const entry = entries.find(e => e.profile_code === code);
+        const entry = entryIndex.get(code);
         const nick = getIngameNick(code);
         const guild = entry ? (entry.guild || '') : '';
         const memo = entry ? (entry.memo || '') : '';
@@ -843,7 +910,7 @@ const UserDB = (() => {
         closeCfCtxMenu();
         const friendMap = {};
         for (const c of codes) {
-          const entry = entries.find(en => en.profile_code === c);
+          const entry = entryIndex.get(c);
           const fl = (entry?.friend_list || '').split(',').map(s => s.trim()).filter(s => s);
           if (fl.length) friendMap[c] = fl;
         }
@@ -911,7 +978,11 @@ const UserDB = (() => {
     try {
       await fetch('/api/user-db', { method: 'DELETE' });
       entries = [];
+      totalRows = 0;
+      currentPage = 0;
+      entryIndex = new Map();
       render();
+      updatePagination();
     } catch (err) {
       console.error('유저 DB 초기화 실패:', err);
       alert('초기화 실패: ' + err);
@@ -924,7 +995,7 @@ const UserDB = (() => {
       const res = await fetch('/api/user-db/deduplicate', { method: 'POST' });
       const data = await res.json();
       alert(`중복 제거 완료: ${data.removed}건 삭제되었습니다.`);
-      await load();
+      await load({ refreshIndex: true });
     } catch (err) {
       console.error('중복 제거 실패:', err);
       alert('중복 제거 실패: ' + err);
@@ -943,7 +1014,7 @@ const UserDB = (() => {
       const data = await res.json();
       if (data.status === 'saved') {
         alert(`${data.count}건의 데이터가 유저 DB에 저장되었습니다.`);
-        await load();
+        await load({ refreshIndex: true });
       } else {
         alert('저장 실패: ' + (data.error || ''));
       }
@@ -954,25 +1025,25 @@ const UserDB = (() => {
 
   function getIngameNick(profileCode) {
     if (!profileCode) return '';
-    const entry = entries.find(e => e.profile_code === profileCode);
+    const entry = entryIndex.get(profileCode);
     return entry ? (entry.ingame_nick || '') : '';
   }
 
   function getGuild(profileCode) {
     if (!profileCode) return '';
-    const entry = entries.find(e => e.profile_code === profileCode);
+    const entry = entryIndex.get(profileCode);
     return entry ? (entry.guild || '') : '';
   }
 
   function getMemo(profileCode) {
     if (!profileCode) return '';
-    const entry = entries.find(e => e.profile_code === profileCode);
+    const entry = entryIndex.get(profileCode);
     return entry ? (entry.memo || '') : '';
   }
 
   function has(profileCode) {
     if (!profileCode) return false;
-    return entries.some(e => e.profile_code === profileCode);
+    return entryIndex.has(profileCode);
   }
 
   // ── 채널 모니터 연동 ─────────────────────────────────────────
@@ -989,7 +1060,7 @@ const UserDB = (() => {
     const coverageMap = new Map();
     const origCodeMap = new Map(); // upper → 원본 케이스
     for (const code of targetCodes) {
-      const entry = entries.find(e => e.profile_code === code);
+      const entry = entryIndex.get(code);
       if (!entry?.friend_list) continue;
       for (const f of parseTags(entry.friend_list)) {
         const fUp = f.toUpperCase();
@@ -1006,11 +1077,15 @@ const UserDB = (() => {
       return;
     }
 
-    // UserDB에서 PPSN 조회
+    // UserDB에서 PPSN 조회 — 대소문자 무시 룩업용 임시 인덱스 (전체 캐시 사용)
+    const upperIndex = new Map();
+    for (const [, e] of entryIndex) {
+      if (e.profile_code) upperIndex.set(e.profile_code.toUpperCase(), e);
+    }
     const ppsnMap = new Map(); // upper → ppsn
     const missingUpper = new Set();
     for (const [fUp] of coverageMap) {
-      const e = entries.find(en => en.profile_code.toUpperCase() === fUp);
+      const e = upperIndex.get(fUp);
       if (e?.ppsn) {
         ppsnMap.set(fUp, e.ppsn);
       } else {
@@ -1061,7 +1136,7 @@ const UserDB = (() => {
           const discovered = await _searchPpsnsForCodes(origNeeded);
           if (discovered.length > 0) {
             await _saveEntriesSilent(discovered);
-            await load();
+            await load({ refreshIndex: true });
             for (const d of discovered) {
               if (d.ppsn) ppsnMap.set(d.profile_code.toUpperCase(), d.ppsn);
             }
@@ -1135,5 +1210,8 @@ const UserDB = (() => {
     }
   }
 
-  return { init, load, render, saveEntries, clearAll, deduplicate, getIngameNick, getGuild, getMemo, has, setFilter, findCommonFriends, closeCommonFriendsModal };
+  /** 외부 모듈용 — 데이터가 변경된 후 호출하므로 항상 인덱스도 갱신 */
+  async function reload() { return load({ refreshIndex: true }); }
+
+  return { init, load: reload, render, saveEntries, clearAll, deduplicate, getIngameNick, getGuild, getMemo, has, setFilter, nextPage, prevPage, findCommonFriends, closeCommonFriendsModal };
 })();
